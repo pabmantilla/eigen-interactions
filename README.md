@@ -45,16 +45,22 @@ em.steer(seq_idx=0, eigvec=0, direction=+1, top_k=5)
 | `steer()` | Propose single-nucleotide edits along an eigenvector |
 | `predict()` | Batch predictions across cell types |
 | `load_encode_expression()` | Download and load ENCODE gene quantification (mean TPM) |
+| `load_proteome()` | Load HPA proteome and annotate motif hits with TF expression |
+| `show_motifs_with_expression()` | Print motif hits with per-cell-type TF protein levels |
 
-## ENCODE TF expression cross-referencing
+## TF expression cross-referencing
 
-Motif hits from `annotate_motifs()` can be cross-referenced against ENCODE RNA-seq gene quantification to check whether matched TFs are actually expressed in each cell type. `load_encode_expression()` auto-downloads RSEM gene quant files from ENCODE and averages TPM across replicates, with gene names mapped via GENCODE v29. Currently configured for K562 and HepG2.
+Two sources of TF expression data are supported to check whether motif-matched TFs are actually present in each cell type:
+
+**ENCODE RNA-seq** — `load_encode_expression()` downloads RSEM gene quant files from ENCODE and averages TPM across replicates (GENCODE v29 gene names). Standalone function.
+
+**HPA cell-line proteome** — `load_proteome()` downloads the [Human Protein Atlas](https://www.proteinatlas.org) cell-line expression table and cross-references it with motif hits, annotating each hit with `ntpm` and an `expressed` flag. Integrated into the `EigenMap` class.
 
 ```python
-from eigen_steering import load_encode_expression
-
-expr = load_encode_expression(cell_types=['K562', 'HepG2'])
-# expr['K562'] -> DataFrame with columns [gene_id, gene_name, TPM]
+em.annotate_motifs()
+em.load_proteome(min_ntpm=1.0)
+em.show_motifs_with_expression(seq_idx=0)
+# Each motif hit now has h['ntpm'] and h['expressed']
 ```
 
 ## Dependencies

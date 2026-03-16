@@ -76,6 +76,18 @@ JASPAR_MEME = os.path.join(_SCRIPT_DIR, 'motif_db', 'JASPAR2026_vertebrates.meme
 REGION_COLORS = {'enhancer': '#2196F3', 'promoter': '#E91E63', 'barcode': '#9C27B0'}
 
 # ---------------------------------------------------------------------------
+# Human Protein Atlas (HPA) cell-line proteome
+# ---------------------------------------------------------------------------
+HPA_URL = 'https://www.proteinatlas.org/download/rna_celline.tsv.zip'
+HPA_CACHE = os.path.join(_SCRIPT_DIR, 'encode_expression', 'hpa_celline.tsv')
+# HPA uses its own cell line names; map to our short names
+HPA_CELL_LINE_MAP = {
+    'K562': 'K-562',
+    'HepG2': 'Hep-G2',
+    'WTC11': None,  # not in HPA
+}
+
+# ---------------------------------------------------------------------------
 # ENCODE scRNA-seq gene quantification
 # ---------------------------------------------------------------------------
 ENCODE_BASE = 'https://www.encodeproject.org'
@@ -190,6 +202,45 @@ def load_encode_expression(cell_types=None, data_dir=None):
         print(f"  {ct}: {len(merged)} genes, "
               f"median TPM={merged['TPM'].median():.2f}")
     return expression
+
+
+def load_hpa_proteome(cell_types=None):
+    """Download (if needed) HPA cell-line RNA expression and return per-cell-type DataFrames.
+
+    Returns dict: {cell_type: DataFrame with columns [gene_name, nTPM, pTPM]}.
+    nTPM = normalized TPM across cell lines; pTPM = protein-coding TPM.
+    """
+    import zipfile, io
+    cell_types = cell_types or ['K562', 'HepG2']
+
+    # Download & cache the TSV
+    if not os.path.exists(HPA_CACHE):
+        os.makedirs(os.path.dirname(HPA_CACHE), exist_ok=True)
+        print(f"  Downloading HPA cell-line data (one-time)...")
+        resp = requests.get(HPA_URL, timeout=120)
+        resp.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            names = zf.namelist()
+            with open(HPA_CACHE, 'wb') as f:
+                f.write(zf.read(names[0]))
+        print(f"  Cached -> {HPA_CACHE}")
+
+    df = pd.read_csv(HPA_CACHE, sep='\t')
+
+    result = {}
+    for ct in cell_types:
+        hpa_name = HPA_CELL_LINE_MAP.get(ct)
+        if hpa_name is None:
+            print(f"  Warning: {ct} not mapped in HPA, skipping.")
+            continue
+        sub = df[df['Cell line'] == hpa_name].copy()
+        sub = sub.rename(columns={'Gene name': 'gene_name'})[
+            ['gene_name', 'nTPM', 'pTPM']
+        ].reset_index(drop=True)
+        result[ct] = sub
+        print(f"  {ct} ({hpa_name}): {len(sub)} genes, "
+              f"median nTPM={sub['nTPM'].median():.1f}")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +865,55 @@ class EigenMap:
             for h in hits:
                 region = 'enhancer' if h['end'] <= ENHANCER_LEN else 'promoter' if h['start'] < BARCODE_START else 'barcode'
                 print(f"    [{h['start']:3d}-{h['end']:3d}] {h['tf']:20s}  p={h['pval']:.1e}  ({region})")
+
+    def load_proteome(self, min_ntpm=1.0):
+        """Load HPA cell-line proteome and cross-ref with motif hits if available.
+
+        Stores self.proteome (dict of DataFrames) and, if motif_hits exist,
+        annotates each hit dict with 'ntpm' (expression in that cell type).
+
+        Args:
+            min_ntpm: threshold to consider a TF as "expressed".
+        """
+        self.proteome = load_hpa_proteome(cell_types=self.cell_types)
+        # Build quick lookup: {ct: {gene_name_upper: nTPM}}
+        self._tf_ntpm = {}
+        for ct, pdf in self.proteome.items():
+            self._tf_ntpm[ct] = dict(zip(pdf['gene_name'].str.upper(), pdf['nTPM']))
+
+        if hasattr(self, 'motif_hits'):
+            n_expressed, n_total = 0, 0
+            for ct in self.cell_types:
+                lookup = self._tf_ntpm.get(ct, {})
+                for seq_hits in self.motif_hits[ct]:
+                    for h in seq_hits:
+                        ntpm = lookup.get(h['tf'].upper(), 0.0)
+                        h['ntpm'] = ntpm
+                        h['expressed'] = ntpm >= min_ntpm
+                        n_total += 1
+                        n_expressed += int(h['expressed'])
+            print(f"  Annotated {n_total} motif hits: "
+                  f"{n_expressed} expressed (nTPM >= {min_ntpm}), "
+                  f"{n_total - n_expressed} below threshold")
+        return self
+
+    def show_motifs_with_expression(self, seq_idx=0):
+        """Print motif hits with HPA expression (nTPM) per cell type."""
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        has_expr = hasattr(self, 'proteome')
+        for ct in self.cell_types:
+            hits = self.motif_hits[ct][seq_idx]
+            print(f"  {ct}: {len(hits)} hits")
+            for h in hits:
+                region = ('enhancer' if h['end'] <= ENHANCER_LEN
+                          else 'promoter' if h['start'] < BARCODE_START
+                          else 'barcode')
+                expr_str = ''
+                if has_expr and 'ntpm' in h:
+                    tag = '+' if h['expressed'] else '-'
+                    expr_str = f"  nTPM={h['ntpm']:7.1f} [{tag}]"
+                print(f"    [{h['start']:3d}-{h['end']:3d}] {h['tf']:20s}  "
+                      f"p={h['pval']:.1e}  ({region}){expr_str}")
 
     def plot_attr_logos_with_motifs(self, seq_idx=0, figsize=(18, 4.5)):
         """Plot attribution logos with per-cell-type motif annotations."""
