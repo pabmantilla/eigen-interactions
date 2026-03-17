@@ -368,7 +368,8 @@ class EigenMap:
         self.constructs: list[str] = []
         self.enhancers: list[str] = []
         self.X: Optional[torch.Tensor] = None        # (N, 4, 281)
-        self.attr: dict[str, np.ndarray] = {}         # ct -> (N, 4, 281)
+        self.attr_hyp: dict[str, np.ndarray] = {}    # ct -> (N, 4, 281) hypothetical corrected
+        self.attr: dict[str, np.ndarray] = {}         # ct -> (N, 4, 281) logo-ready (hyp * ohe)
         self.importance: dict[str, np.ndarray] = {}   # ct -> (N, 281)
         self.predictions: dict[str, np.ndarray] = {}  # ct -> (N,) predicted values
         self.actual: dict[str, Optional[np.ndarray]] = {}  # ct -> (N,) if provided
@@ -427,40 +428,49 @@ class EigenMap:
             raise ValueError(f"Unknown method: {method}")
 
         # Gradient correction: mean-center across the 4 nucleotide channels
-        # then multiply by one-hot so attr stores visualization-ready maps
         ohe = self.X.numpy()  # (N, 4, L)
         for ct in self.cell_types:
             corrected = (self.attr[ct]
                          - self.attr[ct].mean(axis=1, keepdims=True))
-            self.attr[ct] = corrected * ohe  # (N, 4, L) — logo-ready
+            self.attr_hyp[ct] = corrected              # hypothetical (all 4 channels)
+            self.attr[ct] = corrected * ohe             # logo-ready
             self.importance[ct] = self.attr[ct].sum(axis=1)  # (N, L)
         return self
 
     def save_attributions(self, path):
-        """Save attributions, importance, and predictions to a compressed .npz file."""
+        """Save hypothetical corrected attribution maps and predictions.
+
+        Always saves the hypothetical (mean-centered, pre one-hot multiply)
+        so all 4 nucleotide channels are preserved. Logo-ready maps and
+        importance are derived on load via `* ohe`.
+        """
         data = {}
         for ct in self.cell_types:
-            if ct in self.attr:
-                data[f'attr_{ct}'] = self.attr[ct]
-            if ct in self.importance:
-                data[f'importance_{ct}'] = self.importance[ct]
+            if ct in self.attr_hyp:
+                data[f'attr_{ct}'] = self.attr_hyp[ct]
             if ct in self.predictions:
                 data[f'predictions_{ct}'] = self.predictions[ct]
         data['cell_types'] = np.array(self.cell_types)
         np.savez_compressed(path, **data)
-        import os as _os
-        size_mb = _os.path.getsize(path if path.endswith('.npz') else path + '.npz') / 1e6
-        print(f"Saved attributions to {path} ({size_mb:.1f} MB)")
+        size_mb = os.path.getsize(path if path.endswith('.npz') else path + '.npz') / 1e6
+        print(f"Saved hypothetical attributions to {path} ({size_mb:.1f} MB)")
         return self
 
     def load_attributions(self, path):
-        """Load attributions, importance, and predictions from a .npz file."""
+        """Load hypothetical corrected attributions from a .npz file.
+
+        Applies `* ohe` to produce logo-ready attr maps and computes
+        importance. Also populates attr_hyp for downstream hypothetical use.
+        """
+        assert self.X is not None, "Call load_sequences() first"
         data = np.load(path, allow_pickle=False)
+        ohe = self.X.numpy()  # (N, 4, L)
         for ct in self.cell_types:
             if f'attr_{ct}' in data:
-                self.attr[ct] = data[f'attr_{ct}']
-            if f'importance_{ct}' in data:
-                self.importance[ct] = data[f'importance_{ct}']
+                hyp = data[f'attr_{ct}']
+                self.attr_hyp[ct] = hyp
+                self.attr[ct] = hyp * ohe
+                self.importance[ct] = self.attr[ct].sum(axis=1)
             if f'predictions_{ct}' in data:
                 self.predictions[ct] = data[f'predictions_{ct}']
         print(f"Loaded attributions for {list(self.attr.keys())} from {path}")
@@ -494,6 +504,116 @@ class EigenMap:
             self.attr[ct] = attr.cpu().numpy()
             del model
             torch.cuda.empty_cache()
+
+    # ----- sharded attribution for large jobs -----
+    @staticmethod
+    def compute_shard(sequences, cell_type, model_name, output_dir,
+                      shard_idx=0, weights_path=None, results_dir=None,
+                      n_shuffles=20, batch_size=50, device='cuda'):
+        """Compute DeepLIFT attributions for a chunk of sequences and save a shard.
+
+        Saves corrected (mean-centered) hypothetical attributions — NOT
+        multiplied by one-hot — so downstream code can do `attr * ohe` for
+        logo-ready maps while retaining scores at all 4 nucleotide positions.
+
+        Designed to be called from SLURM array jobs.
+        """
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        wp = weights_path or WEIGHTS_PATH
+        rd = results_dir or RESULTS_DIR
+
+        # One-hot encode
+        X_list = []
+        for seq in sequences:
+            construct = seq + PROMOTER_SEQ + RAND_BARCODE
+            ohe = sequence_to_onehot(construct).astype(np.float32)
+            X_list.append(torch.from_numpy(ohe).T)
+        X = torch.stack(X_list)
+
+        # Load model
+        ckpt_path = os.path.join(rd, model_name, 'checkpoints', 'best_stage2.pt')
+        if not os.path.exists(ckpt_path):
+            ckpt_path = os.path.join(rd, model_name, 'best_stage2.pt')
+        enc = AlphaGenome.from_pretrained(wp, device='cpu')
+        remove_all_heads(enc)
+        hd = MPRAHead()
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        enc.load_state_dict(ckpt['model_state_dict'], strict=False)
+        hd.load_state_dict(ckpt['head_state_dict'])
+        model = AlphaGenomeMPRA(enc, hd, squeeze=False).to(device).eval()
+
+        # Predictions (batched)
+        pred_chunks = []
+        with torch.no_grad():
+            for i in range(0, len(X), batch_size):
+                chunk = X[i:i+batch_size].to(device)
+                pred_chunks.append(model(chunk).squeeze(-1).cpu())
+        predictions = torch.cat(pred_chunks).numpy()
+        del pred_chunks
+        torch.cuda.empty_cache()
+
+        # DeepLIFT/SHAP
+        attr = deep_lift_shap(
+            model, X, target=0,
+            n_shuffles=n_shuffles, batch_size=batch_size,
+            device=str(device),
+            additional_nonlinear_ops={AGCustomGELU: _nonlinear},
+            warning_threshold=0.01, random_state=None, verbose=True,
+        ).cpu().numpy()
+
+        # Correction: mean-center across nucleotide channels (keep hypothetical)
+        attr_corrected = attr - attr.mean(axis=1, keepdims=True)
+
+        # Save shard
+        os.makedirs(output_dir, exist_ok=True)
+        shard_path = os.path.join(output_dir, f'{cell_type}_shard_{shard_idx:04d}.npz')
+        np.savez_compressed(shard_path,
+                            attr=attr_corrected,
+                            predictions=predictions)
+        size_mb = os.path.getsize(shard_path) / 1e6
+        print(f"Shard saved: {shard_path} ({size_mb:.1f} MB, {len(sequences)} seqs)")
+
+        del model, attr, attr_corrected
+        torch.cuda.empty_cache()
+        return shard_path
+
+    @staticmethod
+    def merge_shards(output_dir, cell_types, output_path, cleanup=False):
+        """Merge per-cell-type shards into a single attribution file.
+
+        Shards are expected at {output_dir}/{ct}_shard_0000.npz, etc.
+        Saves corrected hypothetical attributions (not multiplied by one-hot).
+        """
+        data = {}
+        for ct in cell_types:
+            import glob as _glob
+            pattern = os.path.join(output_dir, f'{ct}_shard_*.npz')
+            shard_files = sorted(_glob.glob(pattern))
+            if not shard_files:
+                print(f"  Warning: no shards for {ct}")
+                continue
+            attrs, preds = [], []
+            for sf in shard_files:
+                d = np.load(sf)
+                attrs.append(d['attr'])
+                preds.append(d['predictions'])
+            data[f'attr_{ct}'] = np.concatenate(attrs)
+            data[f'predictions_{ct}'] = np.concatenate(preds)
+            print(f"  {ct}: {len(shard_files)} shards -> {data[f'attr_{ct}'].shape}")
+
+        data['cell_types'] = np.array(cell_types)
+        np.savez_compressed(output_path, **data)
+        size_mb = os.path.getsize(
+            output_path if output_path.endswith('.npz') else output_path + '.npz'
+        ) / 1e6
+        print(f"Merged -> {output_path} ({size_mb:.1f} MB)")
+
+        if cleanup:
+            for ct in cell_types:
+                pattern = os.path.join(output_dir, f'{ct}_shard_*.npz')
+                for sf in sorted(_glob.glob(pattern)):
+                    os.remove(sf)
+            print("  Cleaned up shard files.")
 
     def _compute_ism(self, verbose):
         for ct in self.cell_types:
@@ -2310,3 +2430,67 @@ class EigenMap:
         return self._plot_inline_heatmap(
             seq_idx, matches, value_key='peak_score',
             unit='ChIP peak score', figsize=figsize)
+
+
+# ---------------------------------------------------------------------------
+# CLI for SLURM array jobs
+# ---------------------------------------------------------------------------
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Compute DeepLIFT attribution shards for SLURM array jobs')
+    sub = parser.add_subparsers(dest='command')
+
+    # --- shard ---
+    p_shard = sub.add_parser('shard', help='Compute one attribution shard')
+    p_shard.add_argument('--csv', required=True, help='Path to sequence CSV')
+    p_shard.add_argument('--seq-col', default='sequence')
+    p_shard.add_argument('--cell-type', required=True)
+    p_shard.add_argument('--model-name', required=True)
+    p_shard.add_argument('--output-dir', required=True)
+    p_shard.add_argument('--shard-idx', type=int, required=True)
+    p_shard.add_argument('--n-shards', type=int, required=True,
+                         help='Total number of shards to split sequences into')
+    p_shard.add_argument('--weights-path', default=None)
+    p_shard.add_argument('--results-dir', default=None)
+    p_shard.add_argument('--n-shuffles', type=int, default=20)
+    p_shard.add_argument('--batch-size', type=int, default=50)
+    p_shard.add_argument('--device', default='cuda')
+
+    # --- merge ---
+    p_merge = sub.add_parser('merge', help='Merge shards into final .npz')
+    p_merge.add_argument('--output-dir', required=True)
+    p_merge.add_argument('--cell-types', nargs='+', required=True)
+    p_merge.add_argument('--output-path', required=True)
+    p_merge.add_argument('--cleanup', action='store_true')
+
+    args = parser.parse_args()
+
+    if args.command == 'shard':
+        import pandas as _pd
+        df = _pd.read_csv(args.csv)
+        seqs = df[args.seq_col].dropna().tolist()
+        # Split into shards
+        chunk_size = (len(seqs) + args.n_shards - 1) // args.n_shards
+        start = args.shard_idx * chunk_size
+        end = min(start + chunk_size, len(seqs))
+        chunk_seqs = seqs[start:end]
+        print(f"Shard {args.shard_idx}/{args.n_shards}: seqs [{start}:{end}] "
+              f"({len(chunk_seqs)} sequences)")
+        EigenMap.compute_shard(
+            sequences=chunk_seqs,
+            cell_type=args.cell_type,
+            model_name=args.model_name,
+            output_dir=args.output_dir,
+            shard_idx=args.shard_idx,
+            weights_path=args.weights_path,
+            results_dir=args.results_dir,
+            n_shuffles=args.n_shuffles,
+            batch_size=args.batch_size,
+            device=args.device,
+        )
+    elif args.command == 'merge':
+        EigenMap.merge_shards(args.output_dir, args.cell_types,
+                              args.output_path, cleanup=args.cleanup)
+    else:
+        parser.print_help()
