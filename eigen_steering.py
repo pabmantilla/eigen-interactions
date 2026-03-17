@@ -37,7 +37,7 @@ from typing import Optional
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, '..'))
 
-for _p in [REPO_ROOT, _SCRIPT_DIR, os.path.join(_SCRIPT_DIR, 'tangermeme')]:
+for _p in [REPO_ROOT, _SCRIPT_DIR]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
