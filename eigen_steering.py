@@ -436,6 +436,36 @@ class EigenMap:
             self.importance[ct] = self.attr[ct].sum(axis=1)  # (N, L)
         return self
 
+    def save_attributions(self, path):
+        """Save attributions, importance, and predictions to a compressed .npz file."""
+        data = {}
+        for ct in self.cell_types:
+            if ct in self.attr:
+                data[f'attr_{ct}'] = self.attr[ct]
+            if ct in self.importance:
+                data[f'importance_{ct}'] = self.importance[ct]
+            if ct in self.predictions:
+                data[f'predictions_{ct}'] = self.predictions[ct]
+        data['cell_types'] = np.array(self.cell_types)
+        np.savez_compressed(path, **data)
+        import os as _os
+        size_mb = _os.path.getsize(path if path.endswith('.npz') else path + '.npz') / 1e6
+        print(f"Saved attributions to {path} ({size_mb:.1f} MB)")
+        return self
+
+    def load_attributions(self, path):
+        """Load attributions, importance, and predictions from a .npz file."""
+        data = np.load(path, allow_pickle=False)
+        for ct in self.cell_types:
+            if f'attr_{ct}' in data:
+                self.attr[ct] = data[f'attr_{ct}']
+            if f'importance_{ct}' in data:
+                self.importance[ct] = data[f'importance_{ct}']
+            if f'predictions_{ct}' in data:
+                self.predictions[ct] = data[f'predictions_{ct}']
+        print(f"Loaded attributions for {list(self.attr.keys())} from {path}")
+        return self
+
     def set_actual(self, actual: dict):
         """Set actual measured expression. actual = {'K562': array, 'HepG2': array}."""
         self.actual = actual
@@ -445,16 +475,21 @@ class EigenMap:
         for ct in self.cell_types:
             print(f"DeepLIFT/SHAP: {ct}...")
             model = self._load_model(ct, squeeze=False)
-            # Store predictions
+            # Store predictions (batched to avoid OOM)
+            pred_chunks = []
             with torch.no_grad():
-                preds = model(self.X.to(self.device)).squeeze(-1).cpu().numpy()
-            self.predictions[ct] = preds
+                for i in range(0, len(self.X), batch_size):
+                    chunk = self.X[i:i+batch_size].to(self.device)
+                    pred_chunks.append(model(chunk).squeeze(-1).cpu())
+            self.predictions[ct] = torch.cat(pred_chunks).numpy()
+            del pred_chunks
+            torch.cuda.empty_cache()
             attr = deep_lift_shap(
                 model, self.X, target=0,
                 n_shuffles=n_shuffles, batch_size=batch_size,
                 device=str(self.device),
                 additional_nonlinear_ops={AGCustomGELU: _nonlinear},
-                warning_threshold=0.01, random_state=42, verbose=verbose,
+                warning_threshold=0.01, random_state=None, verbose=verbose,
             )
             self.attr[ct] = attr.cpu().numpy()
             del model
