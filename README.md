@@ -4,7 +4,7 @@ Eigenvector decomposition of cross-cell-type attribution maps for LentiMPRA enha
 
 ## Overview
 
-Given DeepLIFT/SHAP or ISM attributions from K cell-type models on N enhancer sequences, `EigenMap` builds per-position importance matrices and decomposes their covariance to find eigenvectors describing **shared** and **cell-type-divergent** regulatory grammar.
+Given DeepLIFT/SHAP or ISM attributions from K cell-type models on N enhancer sequences, `EigenMap` builds per-position importance matrices and decomposes their covariance to find eigenvectors describing **shared** and **cell-type-divergent** regulatory grammar. These eigenvectors are lienar combinations of features that can be used to characterize sequences by their regulatory mechanism and steer sequence evolution towards desired cell-type specific/agnostic regulatory mechanisms. 
 
 ## Structure
 
