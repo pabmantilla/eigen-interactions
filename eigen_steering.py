@@ -44,7 +44,7 @@ for _p in [REPO_ROOT, _SCRIPT_DIR]:
 from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.transfer import remove_all_heads
 from alphagenome_pytorch.extensions.finetuning.utils import sequence_to_onehot
-from tangermeme.plot import plot_logo
+from fast_logo import fast_logo
 from tangermeme.deep_lift_shap import deep_lift_shap, _nonlinear
 from tangermeme.seqlet import tfmodisco_seqlets
 from tangermeme.annotate import annotate_seqlets
@@ -755,8 +755,7 @@ class EigenMap:
 
         for ci, ct in enumerate(self.cell_types):
             ax = axes[ci]
-            plot_logo(self.attr[ct][seq_idx], ax=ax, ylim=yabs)
-            ax.set_ylim(*ylim)
+            fast_logo(self.attr[ct][seq_idx], ax=ax, ylim=ylim)
             ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10, color=REGION_COLORS['promoter'])
             ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10, color=REGION_COLORS['barcode'])
 
@@ -802,8 +801,7 @@ class EigenMap:
 
         for ei in range(n_ct):
             ax = axes[ei]
-            plot_logo(ev_logos[ei], ax=ax, ylim=yabs)
-            ax.set_ylim(*ylim)
+            fast_logo(ev_logos[ei], ax=ax, ylim=ylim)
             ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10, color=REGION_COLORS['promoter'])
             ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10, color=REGION_COLORS['barcode'])
             ev = r['eigenvectors'][:, ei]
@@ -1449,7 +1447,7 @@ class EigenMap:
         axes = []
         for ci, ct in enumerate(self.cell_types):
             ax = fig.add_subplot(gs[ci])
-            plot_logo(self.attr[ct][seq_idx], ax=ax, ylim=yabs)
+            fast_logo(self.attr[ct][seq_idx], ax=ax, ylim=(-yabs, yabs))
             ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10,
                        color=REGION_COLORS['promoter'])
             ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10,
@@ -1589,7 +1587,7 @@ class EigenMap:
         axes = []
         for ci, ct in enumerate(self.cell_types):
             ax = fig.add_subplot(gs[ci])
-            plot_logo(self.attr[ct][seq_idx], ax=ax, ylim=yabs)
+            fast_logo(self.attr[ct][seq_idx], ax=ax, ylim=(-yabs, yabs))
             ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10,
                        color=REGION_COLORS['promoter'])
             ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10,
