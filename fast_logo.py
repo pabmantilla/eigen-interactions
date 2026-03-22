@@ -130,6 +130,8 @@ def fast_logo(
         data with a small 5 % padding.
     """
     _CACHE.build()
+    if values.ndim == 2 and values.shape[0] == 4 and values.shape[1] != 4:
+        values = values.T
     if values.ndim != 2 or values.shape[1] != 4:
         raise ValueError(f"Expected values shape (L, 4), got {values.shape}")
 
