@@ -773,55 +773,44 @@ class EigenMap:
         return fig, axes
 
     def plot_eigen_logos(self, seq_idx=0, figsize=(18, 8)):
-        """Attribution logos per cell type + eigenvector-1 weighted reconstruction.
+        """One attribution logo per eigenvector (K logos for K cell types).
 
-        All logos on the same y-scale (raw attribution units). The final row
-        shows the eigenvector-1 logo: the linear combination of cell-type
-        attributions weighted by the first eigenvector.
+        Each logo is the linear combination of cell-type attributions weighted
+        by the corresponding eigenvector. All logos share the same y-scale.
         """
         r = self.eigen_results[seq_idx]
         n_ct = len(self.cell_types)
-
-        # Use raw attributions (not L2-normalized) — shared y-scale instead
         attr_raw = {ct: self.attr[ct][seq_idx] for ct in self.cell_types}
 
-        # Eigenvector-1 weighted logo
-        ev1 = r['eigenvectors'][:, 0]  # (K,)
-        ev1_logo = sum(
-            ev1[ci] * attr_raw[ct] for ci, ct in enumerate(self.cell_types)
-        )
+        # Build one weighted-reconstruction logo per eigenvector
+        ev_logos = []
+        for ei in range(n_ct):
+            ev = r['eigenvectors'][:, ei]  # (K,)
+            logo = sum(
+                ev[ci] * attr_raw[ct] for ci, ct in enumerate(self.cell_types)
+            )
+            ev_logos.append(logo)
 
-        # Shared y-limits across all panels
-        all_vals = np.concatenate(
-            [attr_raw[ct].ravel() for ct in self.cell_types] + [ev1_logo.ravel()]
-        )
+        # Shared y-limits
+        all_vals = np.concatenate([l.ravel() for l in ev_logos])
         yabs = max(abs(all_vals.min()), abs(all_vals.max())) * 1.05
         ylim = (-yabs, yabs)
 
-        n_rows = n_ct + 1
-        fig, axes = plt.subplots(n_rows, 1, figsize=figsize)
+        fig, axes = plt.subplots(n_ct, 1, figsize=figsize)
+        if n_ct == 1:
+            axes = [axes]
 
-        for ci, ct in enumerate(self.cell_types):
-            ax = axes[ci]
-            plot_logo(attr_raw[ct], ax=ax, ylim=yabs)
+        for ei in range(n_ct):
+            ax = axes[ei]
+            plot_logo(ev_logos[ei], ax=ax, ylim=yabs)
             ax.set_ylim(*ylim)
             ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10, color=REGION_COLORS['promoter'])
             ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10, color=REGION_COLORS['barcode'])
-            w = ev1[ci]
-            ax.set_title(f'{ct}  (eigenvector 1 weight: {w:+.3f})', fontsize=10)
-
-        ax = axes[-1]
-        plot_logo(ev1_logo, ax=ax, ylim=yabs)
-        ax.set_ylim(*ylim)
-        ax.axvspan(PROMOTER_START, BARCODE_START, alpha=0.10, color=REGION_COLORS['promoter'])
-        ax.axvspan(BARCODE_START, TOTAL_LEN, alpha=0.10, color=REGION_COLORS['barcode'])
-        weights_str = ', '.join(f'{ct}:{ev1[ci]:+.2f}'
-                                for ci, ct in enumerate(self.cell_types))
-        v = r['var_ratio'][0] * 100
-        ax.set_title(f'Eigenvector 1 = [{weights_str}]  ({v:.0f}% variance)', fontsize=10)
-        for spine in ax.spines.values():
-            spine.set_edgecolor('#FF5722')
-            spine.set_linewidth(2)
+            ev = r['eigenvectors'][:, ei]
+            weights_str = ', '.join(f'{ct}:{ev[ci]:+.2f}'
+                                    for ci, ct in enumerate(self.cell_types))
+            v = r['var_ratio'][ei] * 100
+            ax.set_title(f'Eigenvector {ei+1} = [{weights_str}]  ({v:.0f}% variance)', fontsize=10)
 
         axes[-1].set_xlabel('Position (230bp enhancer | 36bp promoter | 15bp barcode)')
         plt.tight_layout()
