@@ -1367,6 +1367,112 @@ class EigenMap:
                 })
         return results
 
+    # ----- mechanism-aware motif ranking -----
+    def rank_motif_hits(self, min_tpm=1.0):
+        """Re-rank TOMTOM hits by binding probability using EI mechanism + expression.
+
+        Uses eigendecomposition results (must already exist) to compute a
+        per-sequence mechanism score s = ei1_var * r, then for each motif
+        hit re-ranks the TOMTOM candidates with a deterministic binding score
+        based purely on expression compatibility:
+
+            w = (1 + s) / 2          # 0 at s=-1, 0.5 at s=0, 1 at s=1
+            shared   = mean(log(TPM+1)) across cell types
+            specific = log(TPM+1) in detecting CT - max(others)
+            binding_score = w * shared + (1 - w) * specific
+
+        Results stored in self.motif_hits_ranked (same structure as motif_hits).
+        Requires: eigendecompose(), annotate_motifs(), load_expression()
+        """
+        assert self.eigen_results, "Run eigendecompose() first."
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        assert hasattr(self, 'tf_tpm'), "Run load_expression() first."
+
+        n_seqs = len(self.eigen_results)
+        n_ct = len(self.cell_types)
+
+        # Per-sequence mechanism score from existing eigendecomposition
+        self.mechanism_scores = np.zeros(n_seqs)
+        for si in range(n_seqs):
+            r = self.eigen_results[si]
+            ei1_var = r['var_ratio'][0]
+            E = r['E_scaled']
+            if n_ct == 2:
+                corr = np.corrcoef(E[:, 0], E[:, 1])[0, 1]
+            else:
+                from itertools import combinations
+                corrs = [np.corrcoef(E[:, i], E[:, j])[0, 1]
+                         for i, j in combinations(range(n_ct), 2)]
+                corr = np.mean(corrs)
+            self.mechanism_scores[si] = ei1_var * (corr if np.isfinite(corr) else 0.0)
+
+        # Re-rank motif hits per cell type
+        self.motif_hits_ranked = {}
+        for ct in self.cell_types:
+            ranked = []
+            for si in range(n_seqs):
+                s = self.mechanism_scores[si]
+                seq_hits = []
+                for h in self.motif_hits[ct][si]:
+                    candidates = h.get('top_hits',
+                                       [{'tf': h['tf'], 'pval': h['pval']}])
+                    scored = []
+                    for cand in candidates:
+                        bs = self._binding_score(cand['tf'], ct, s)
+                        scored.append({**cand, 'binding_score': bs})
+                    scored.sort(key=lambda x: x['binding_score'], reverse=True)
+                    seq_hits.append({
+                        **h,
+                        'top_hits': scored,
+                        'tf': scored[0]['tf'],
+                        'binding_score': scored[0]['binding_score'],
+                    })
+                ranked.append(seq_hits)
+            self.motif_hits_ranked[ct] = ranked
+
+        # Summary
+        n_changed = 0
+        for ct in self.cell_types:
+            for si in range(n_seqs):
+                for orig, new in zip(self.motif_hits[ct][si],
+                                     self.motif_hits_ranked[ct][si]):
+                    if orig['tf'] != new['tf']:
+                        n_changed += 1
+        total = sum(len(self.motif_hits[ct][si])
+                    for ct in self.cell_types for si in range(n_seqs))
+        print(f"Ranked motif hits: {n_changed}/{total} TF assignments changed "
+              f"across {n_seqs} sequences")
+        return self
+
+    def _binding_score(self, tf_name, detecting_ct, mechanism_score):
+        """Deterministic binding score from expression + EI mechanism.
+
+        binding_score = w * shared + (1 - w) * specific
+
+        w = (1 + s) / 2  where s = ei1_var * r  (clamped to [-1, 1])
+        shared   = mean of log(TPM+1) across all cell types
+        specific = log(TPM+1) in detecting_ct - max(log(TPM+1) in others)
+        """
+        components = self._parse_tf_components(tf_name)
+
+        # Best expression per cell type across subunits
+        log_expr = {}
+        for ct in self.cell_types:
+            tpm = max((self.tf_tpm.get(g, {}).get(ct, 0.0)
+                       for g in components), default=0.0)
+            log_expr[ct] = np.log1p(tpm)
+
+        # Smooth weight from mechanism score
+        s = np.clip(mechanism_score, -1, 1)
+        w = (1 + s) / 2  # 0 when s=-1, 0.5 when s=0, 1 when s=1
+
+        shared = np.mean(list(log_expr.values()))
+        detect = log_expr[detecting_ct]
+        others = [log_expr[ct] for ct in self.cell_types if ct != detecting_ct]
+        specific = detect - (max(others) if others else 0.0)
+
+        return w * shared + (1 - w) * specific
+
     def plot_expression_match(self, seq_idx=0, top_k=1, min_tpm=1.0,
                               max_paralogs=4, figsize=(20, None),
                               annotation_style='bars'):
