@@ -1028,14 +1028,9 @@ class EigenMap:
                 'top_hits': top_hits,
                 'attribution': float(seqlets.iloc[si, 3]) if seqlets.shape[1] > 3 else 0.0,
             })
-        # Deduplicate overlapping hits: keep best p-value per overlapping group
+        # Sort by attribution magnitude (binding score), keep all including overlaps
         for i in range(n_seq):
-            hits = sorted(per_seq[i], key=lambda x: x['pval'])
-            kept = []
-            for h in hits:
-                if not any(h['start'] < k['end'] and h['end'] > k['start'] for k in kept):
-                    kept.append(h)
-            per_seq[i] = sorted(kept, key=lambda x: x['start'])
+            per_seq[i] = sorted(per_seq[i], key=lambda x: (-abs(x['attribution']), x['start']))
         n_hits = sum(len(h) for h in per_seq)
         return per_seq, n_hits
 
