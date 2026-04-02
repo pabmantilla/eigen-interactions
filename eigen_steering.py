@@ -17,6 +17,7 @@ Usage:
 
 import os
 import sys
+import itertools
 import urllib.request
 try:
     import requests
@@ -46,6 +47,7 @@ from alphagenome_pytorch.extensions.finetuning.transfer import remove_all_heads
 from alphagenome_pytorch.extensions.finetuning.utils import sequence_to_onehot
 from fast_logo import fast_logo
 from tangermeme.deep_lift_shap import deep_lift_shap, _nonlinear
+from tangermeme.ersatz import dinucleotide_shuffle
 from tangermeme.seqlet import tfmodisco_seqlets
 from tangermeme.annotate import annotate_seqlets
 from tangermeme.io import read_meme
@@ -959,6 +961,227 @@ class EigenMap:
             del model
             torch.cuda.empty_cache()
         return preds
+
+    def _predict_tensor(self, X_tensor, cell_type=None, batch_size=64):
+        """Forward pass on a (N, 4, L) float tensor. Returns {ct: np.ndarray}."""
+        cts = [cell_type] if cell_type else self.cell_types
+        preds = {}
+        for ct in cts:
+            model = self._load_model(ct, squeeze=True)
+            chunks = []
+            with torch.no_grad():
+                for i in range(0, len(X_tensor), batch_size):
+                    batch = X_tensor[i:i+batch_size].to(self.device)
+                    chunks.append(model(batch).cpu().numpy())
+            preds[ct] = np.concatenate(chunks)
+            del model
+            torch.cuda.empty_cache()
+        return preds
+
+    # ----- necessity / sufficiency tests -----
+
+    def necessity_test(self, seq_idx=None, n_shuffles=20, nec_order=1,
+                       batch_size=64, random_state=None):
+        """Necessity test — marginalized local knockout of motif regions.
+
+        For each sequence, generates dinucleotide-shuffled backgrounds and
+        replaces each motif region in the WT sequence with the corresponding
+        shuffled positions.  The average prediction delta (chimera − WT) is
+        the necessity score: a large negative value means the motif is
+        necessary for expression.
+
+        Parameters
+        ----------
+        seq_idx : int, list[int], or None
+            Sequence index/indices to test.  None = all sequences.
+        n_shuffles : int
+            Number of dinucleotide-shuffled replicates per knockout.
+        nec_order : int
+            Maximum combinatorial order.  1 = single-motif knockouts,
+            2 = all pairwise, etc.  Capped at the number of motifs.
+        batch_size : int
+            Prediction batch size.
+        random_state : int or None
+            Seed for reproducibility.
+
+        Returns
+        -------
+        dict  keyed by cell type, each value is a list (per sequence) of
+              list[dict] with keys:
+                'motifs' : list[dict] with 'start','end','tf' for each
+                           motif in the combination
+                'order'  : int (1, 2, …)
+                'scores' : {ct: float} — mean ΔpredWT for each cell type
+        """
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        idxs = self._resolve_seq_idxs(seq_idx)
+        results = [[] for _ in range(len(self.constructs))]
+
+        for si in idxs:
+            positions = self._collect_motif_positions(si)
+            if not positions:
+                continue
+            max_order = min(nec_order, len(positions))
+
+            # WT one-hot: (1, 4, L)
+            wt = self.X[si:si+1].float()
+
+            # shuffled backgrounds: (1, n_shuffles, 4, L) -> (n_shuffles, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+                                        random_state=random_state)[0]
+
+            # WT prediction
+            wt_preds = self._predict_tensor(wt, batch_size=batch_size)
+
+            for order in range(1, max_order + 1):
+                for combo in itertools.combinations(range(len(positions)), order):
+                    motif_info = [{'start': positions[j]['start'],
+                                   'end': positions[j]['end'],
+                                   'tf': positions[j]['tf_names'][0]
+                                         if positions[j]['tf_names'] else '?'}
+                                  for j in combo]
+
+                    # build chimeras: replace motif regions with shuffled
+                    chimeras = wt.expand(n_shuffles, -1, -1).clone()
+                    for k in range(n_shuffles):
+                        for m in motif_info:
+                            s, e = m['start'], m['end']
+                            chimeras[k, :, s:e] = shuf[k, :, s:e]
+
+                    chi_preds = self._predict_tensor(chimeras,
+                                                     batch_size=batch_size)
+                    scores = {}
+                    for ct in self.cell_types:
+                        scores[ct] = float(chi_preds[ct].mean()
+                                           - wt_preds[ct][0])
+
+                    results[si].append({
+                        'motifs': motif_info,
+                        'order': order,
+                        'scores': scores,
+                    })
+
+            print(f"  seq {si}: {len(positions)} motifs, "
+                  f"orders 1..{max_order} -> {len(results[si])} tests")
+
+        return results
+
+    def sufficiency_test(self, seq_idx=None, n_shuffles=20, suf_order=1,
+                         suff_pos=None, batch_size=64, random_state=None):
+        """Sufficiency test — marginalized global knock-in of motif regions.
+
+        For each sequence, generates dinucleotide-shuffled backgrounds and
+        drops the WT motif into the shuffled sequence at *suff_pos* (default:
+        centered in the 230 bp enhancer).  The average prediction delta
+        (knock-in − shuffled baseline) is the sufficiency score: a large
+        positive value means the motif alone is sufficient to drive expression.
+
+        Parameters
+        ----------
+        seq_idx : int, list[int], or None
+            Sequence index/indices.  None = all.
+        n_shuffles : int
+            Dinucleotide-shuffled replicates.
+        suf_order : int
+            Maximum combinatorial order (like nec_order).
+        suff_pos : int or None
+            Centre position (in the 230 bp enhancer, 0-indexed) where the
+            motif is placed.  None = ENHANCER_LEN // 2.  Motif bases that
+            fall outside [0, ENHANCER_LEN) are clipped.  Range: 0 .. L-1
+            where L = ENHANCER_LEN.
+        batch_size : int
+            Prediction batch size.
+        random_state : int or None
+            Seed for reproducibility.
+
+        Returns
+        -------
+        Same structure as necessity_test.
+        """
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        if suff_pos is None:
+            suff_pos = ENHANCER_LEN // 2
+        idxs = self._resolve_seq_idxs(seq_idx)
+        results = [[] for _ in range(len(self.constructs))]
+
+        for si in idxs:
+            positions = self._collect_motif_positions(si)
+            if not positions:
+                continue
+            max_order = min(suf_order, len(positions))
+
+            wt = self.X[si:si+1].float()
+
+            # shuffled backgrounds: (n_shuffles, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+                                        random_state=random_state)[0]
+
+            # baseline predictions on pure shuffled backgrounds
+            shuf_preds = self._predict_tensor(shuf, batch_size=batch_size)
+
+            for order in range(1, max_order + 1):
+                for combo in itertools.combinations(range(len(positions)), order):
+                    motif_info = [{'start': positions[j]['start'],
+                                   'end': positions[j]['end'],
+                                   'tf': positions[j]['tf_names'][0]
+                                         if positions[j]['tf_names'] else '?'}
+                                  for j in combo]
+
+                    # build knock-ins: place WT motif(s) into shuffled bg
+                    # for order>1, preserve relative spacing between motifs
+                    # and centre the group at suff_pos
+                    knockins = shuf.clone()
+                    if len(motif_info) == 1:
+                        group_offset = suff_pos - (motif_info[0]['start']
+                                                   + motif_info[0]['end']) // 2
+                    else:
+                        group_lo = min(m['start'] for m in motif_info)
+                        group_hi = max(m['end'] for m in motif_info)
+                        group_center = (group_lo + group_hi) // 2
+                        group_offset = suff_pos - group_center
+
+                    for m in motif_info:
+                        orig_start, orig_end = m['start'], m['end']
+                        motif_len = orig_end - orig_start
+                        new_start = orig_start + group_offset
+                        # clip to enhancer region [0, ENHANCER_LEN)
+                        src_lo = max(0, -new_start)
+                        src_hi = motif_len - max(0,
+                                                 (new_start + motif_len)
+                                                 - ENHANCER_LEN)
+                        dst_lo = max(0, new_start)
+                        dst_hi = dst_lo + (src_hi - src_lo)
+                        if dst_hi <= dst_lo:
+                            continue
+                        wt_frag = wt[0, :, orig_start + src_lo:
+                                            orig_start + src_hi]
+                        knockins[:, :, dst_lo:dst_hi] = wt_frag
+
+                    ki_preds = self._predict_tensor(knockins,
+                                                    batch_size=batch_size)
+                    scores = {}
+                    for ct in self.cell_types:
+                        scores[ct] = float(ki_preds[ct].mean()
+                                           - shuf_preds[ct].mean())
+
+                    results[si].append({
+                        'motifs': motif_info,
+                        'order': order,
+                        'scores': scores,
+                    })
+
+            print(f"  seq {si}: {len(positions)} motifs, "
+                  f"orders 1..{max_order} -> {len(results[si])} tests")
+
+        return results
+
+    def _resolve_seq_idxs(self, seq_idx):
+        """Normalise seq_idx arg to a list of ints."""
+        if seq_idx is None:
+            return list(range(len(self.constructs)))
+        if isinstance(seq_idx, (int, np.integer)):
+            return [int(seq_idx)]
+        return [int(i) for i in seq_idx]
 
     def summary(self, seq_idx=0):
         """Print eigendecomposition summary."""
