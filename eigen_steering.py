@@ -1196,6 +1196,154 @@ class EigenMap:
         torch.cuda.empty_cache()
         return results
 
+    def shapley_interaction_index(self, seq_idx=None, max_order=2, n_shuffles=20,
+                                  batch_size=128, random_state=None):
+        """Shapley Interaction Indices for motifs via necessity (KO) game.
+
+        For each sequence, computes the k-SII up to max_order using the
+        shapiq library.  The value function is necessity-based: v(S) is the
+        prediction when only motifs in coalition S are intact (motifs NOT
+        in S are replaced with dinucleotide-shuffled content).
+
+        All chimeras for a sequence are built at once and scored in a single
+        _predict_tensor call per cell type, then fed to shapiq as a
+        pre-computed game.
+
+        Parameters
+        ----------
+        seq_idx : int, list[int], or None
+            Sequence index/indices.  None = all.
+        max_order : int
+            Maximum interaction order for k-SII (default 2 = pairwise).
+        n_shuffles : int
+            Dinucleotide-shuffled replicates per coalition.
+        batch_size : int
+            Prediction batch size.
+        random_state : int or None
+            Seed for reproducibility.
+
+        Returns
+        -------
+        list of dict (one per sequence index), each with:
+            'motifs'           : list of motif name strings
+            'interactions'     : dict mapping tuples of motif indices ->
+                                 {ct: sii_score}
+            'coalition_values' : dict mapping coalition tuples ->
+                                 {ct: avg_prediction}
+            'n_motifs'         : int
+        """
+        import shapiq
+
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        idxs = self._resolve_seq_idxs(seq_idx)
+        results = [None] * len(self.constructs)
+
+        for si in idxs:
+            positions = self._collect_motif_positions(si)
+            n_motifs = len(positions)
+            if n_motifs == 0:
+                results[si] = {
+                    'motifs': [], 'interactions': {}, 'coalition_values': {},
+                    'n_motifs': 0,
+                }
+                continue
+
+            order = min(max_order, n_motifs)
+
+            # motif names
+            motif_names = [
+                pos['tf_names'][0] if pos['tf_names'] else '?'
+                for pos in positions
+            ]
+
+            # WT one-hot: (1, 4, L)
+            wt = self.X[si:si+1].float()
+
+            # shuffled backgrounds: (n_shuffles, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+                                        random_state=random_state)[0]
+
+            # enumerate all 2^n coalitions as binary masks
+            all_coalitions = np.array(
+                list(itertools.product([0, 1], repeat=n_motifs)),
+                dtype=bool,
+            )  # (2^n, n_motifs)
+            n_coalitions = len(all_coalitions)
+
+            # build all chimeras: (n_coalitions * n_shuffles, 4, L)
+            chimeras = []
+            for coal in all_coalitions:
+                # coal[j] = True means motif j is KEPT (intact)
+                # motifs NOT in coalition get shuffled content
+                ko_indices = [j for j in range(n_motifs) if not coal[j]]
+                expanded = wt.expand(n_shuffles, -1, -1).clone()
+                for k in range(n_shuffles):
+                    for j in ko_indices:
+                        s, e = positions[j]['start'], positions[j]['end']
+                        expanded[k, :, s:e] = shuf[k, :, s:e]
+                chimeras.append(expanded)
+
+            chimeras = torch.cat(chimeras, dim=0)  # (n_coalitions * n_shuffles, 4, L)
+
+            # single prediction call per cell type
+            all_preds = self._predict_tensor(chimeras, batch_size=batch_size)
+
+            # reshape to (n_coalitions, n_shuffles) and average over shuffles
+            coalition_values = {}  # tuple -> {ct: float}
+            for ci, coal in enumerate(all_coalitions):
+                key = tuple(int(x) for x in coal)
+                coalition_values[key] = {}
+                for ct in self.cell_types:
+                    vals = all_preds[ct][ci * n_shuffles:(ci + 1) * n_shuffles]
+                    coalition_values[key][ct] = float(vals.mean())
+
+            # compute SII per cell type using shapiq
+            interactions = {}
+            for ct in self.cell_types:
+                # build lookup array aligned with shapiq coalition ordering
+                def _value_fn(coalitions_binary, _ct=ct):
+                    # coalitions_binary: (n_coalitions, n_motifs) bool/int
+                    out = np.zeros(len(coalitions_binary))
+                    for i, coal in enumerate(coalitions_binary):
+                        key = tuple(int(x) for x in coal)
+                        out[i] = coalition_values[key][_ct]
+                    return out
+
+                # create a Game from the precomputed value function
+                class PrecomputedGame(shapiq.Game):
+                    def __init__(self_game):
+                        super().__init__(
+                            n_players=n_motifs,
+                            normalization_value=coalition_values[
+                                tuple([0] * n_motifs)][_ct],
+                        )
+
+                    def value_function(self_game, coalitions):
+                        return _value_fn(coalitions)
+
+                game = PrecomputedGame()
+                exact = shapiq.ExactComputer(n_players=n_motifs, game=game)
+                sii_result = exact(index="k-SII", order=order)
+
+                # extract interaction values
+                for interaction_key in sii_result.dict_values:
+                    score = float(sii_result.dict_values[interaction_key])
+                    if interaction_key not in interactions:
+                        interactions[interaction_key] = {}
+                    interactions[interaction_key][ct] = score
+
+            results[si] = {
+                'motifs': motif_names,
+                'interactions': interactions,
+                'coalition_values': coalition_values,
+                'n_motifs': n_motifs,
+            }
+
+            print(f"  seq {si}: {n_motifs} motifs, {n_coalitions} coalitions, "
+                  f"order {order} -> {len(interactions)} interaction terms")
+
+        return results
+
     def _resolve_seq_idxs(self, seq_idx):
         """Normalise seq_idx arg to a list of ints."""
         if seq_idx is None:
