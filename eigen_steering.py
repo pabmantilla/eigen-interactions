@@ -1332,22 +1332,23 @@ class EigenMap:
             # compute SII per cell type using shapiq
             interactions = {}
             for ct in self.cell_types:
+                _ct = ct  # capture for closures below
+
                 # build lookup array aligned with shapiq coalition ordering
-                def _value_fn(coalitions_binary, _ct=ct):
-                    # coalitions_binary: (n_coalitions, n_motifs) bool/int
+                def _value_fn(coalitions_binary, _c=_ct):
                     out = np.zeros(len(coalitions_binary))
                     for i, coal in enumerate(coalitions_binary):
                         key = tuple(int(x) for x in coal)
-                        out[i] = coalition_values[key][_ct]
+                        out[i] = coalition_values[key][_c]
                     return out
 
-                # create a Game from the precomputed value function
+                empty_val = coalition_values[tuple([0] * n_motifs)][_ct]
+
                 class PrecomputedGame(shapiq.Game):
-                    def __init__(self_game):
+                    def __init__(self_game, nv=empty_val):
                         super().__init__(
                             n_players=n_motifs,
-                            normalization_value=coalition_values[
-                                tuple([0] * n_motifs)][_ct],
+                            normalization_value=nv,
                         )
 
                     def value_function(self_game, coalitions):
