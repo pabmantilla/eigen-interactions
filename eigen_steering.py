@@ -1044,33 +1044,48 @@ class EigenMap:
             wt_preds = self._predict_tensor(wt, models=models,
                                             batch_size=batch_size)
 
+            # enumerate all combos and build all chimeras at once
+            combos = []
             for order in range(1, max_order + 1):
                 for combo in itertools.combinations(range(len(positions)), order):
-                    motif_info = [{'start': positions[j]['start'],
-                                   'end': positions[j]['end'],
-                                   'tf': positions[j]['tf_names'][0]
-                                         if positions[j]['tf_names'] else '?'}
-                                  for j in combo]
+                    combos.append(combo)
 
-                    # build chimeras: replace motif regions with shuffled
-                    chimeras = wt.expand(n_rep, -1, -1).clone()
-                    for k in range(n_rep):
-                        for m in motif_info:
-                            s, e = m['start'], m['end']
-                            chimeras[k, :, s:e] = shuf[k, :, s:e]
+            all_chimeras = []
+            combo_info = []
+            for combo in combos:
+                motif_info = [{'start': positions[j]['start'],
+                               'end': positions[j]['end'],
+                               'tf': positions[j]['tf_names'][0]
+                                     if positions[j]['tf_names'] else '?'}
+                              for j in combo]
+                combo_info.append((len(combo), motif_info))
 
-                    chi_preds = self._predict_tensor(chimeras, models=models,
-                                                     batch_size=batch_size)
-                    scores = {}
-                    for ct in self.cell_types:
-                        scores[ct] = float(chi_preds[ct].mean()
-                                           - wt_preds[ct][0])
+                chimeras = wt.expand(n_rep, -1, -1).clone()
+                for k in range(n_rep):
+                    for m in motif_info:
+                        s, e = m['start'], m['end']
+                        chimeras[k, :, s:e] = shuf[k, :, s:e]
+                all_chimeras.append(chimeras)
 
-                    results[si].append({
-                        'motifs': motif_info,
-                        'order': order,
-                        'scores': scores,
-                    })
+            if not all_chimeras:
+                continue
+
+            # single prediction call for all combos
+            all_chimeras = torch.cat(all_chimeras, dim=0)
+            all_preds = self._predict_tensor(all_chimeras, models=models,
+                                             batch_size=batch_size)
+
+            # slice results back per combo
+            for ci, (order, motif_info) in enumerate(combo_info):
+                scores = {}
+                for ct in self.cell_types:
+                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                    scores[ct] = float(vals.mean() - wt_preds[ct][0])
+                results[si].append({
+                    'motifs': motif_info,
+                    'order': order,
+                    'scores': scores,
+                })
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
@@ -1136,56 +1151,70 @@ class EigenMap:
             shuf_preds = self._predict_tensor(shuf, models=models,
                                               batch_size=batch_size)
 
+            # enumerate all combos and build all knock-ins at once
+            combos = []
             for order in range(1, max_order + 1):
                 for combo in itertools.combinations(range(len(positions)), order):
-                    motif_info = [{'start': positions[j]['start'],
-                                   'end': positions[j]['end'],
-                                   'tf': positions[j]['tf_names'][0]
-                                         if positions[j]['tf_names'] else '?'}
-                                  for j in combo]
+                    combos.append(combo)
 
-                    # build knock-ins: place WT motif(s) into shuffled bg
-                    # for order>1, preserve relative spacing between motifs
-                    # and centre the group at suff_pos
-                    knockins = shuf.clone()
-                    if len(motif_info) == 1:
-                        group_offset = suff_pos - (motif_info[0]['start']
-                                                   + motif_info[0]['end']) // 2
-                    else:
-                        group_lo = min(m['start'] for m in motif_info)
-                        group_hi = max(m['end'] for m in motif_info)
-                        group_center = (group_lo + group_hi) // 2
-                        group_offset = suff_pos - group_center
+            all_knockins = []
+            combo_info = []
+            for combo in combos:
+                motif_info = [{'start': positions[j]['start'],
+                               'end': positions[j]['end'],
+                               'tf': positions[j]['tf_names'][0]
+                                     if positions[j]['tf_names'] else '?'}
+                              for j in combo]
+                combo_info.append((len(combo), motif_info))
 
-                    for m in motif_info:
-                        orig_start, orig_end = m['start'], m['end']
-                        motif_len = orig_end - orig_start
-                        new_start = orig_start + group_offset
-                        # clip to enhancer region [0, ENHANCER_LEN)
-                        src_lo = max(0, -new_start)
-                        src_hi = motif_len - max(0,
-                                                 (new_start + motif_len)
-                                                 - ENHANCER_LEN)
-                        dst_lo = max(0, new_start)
-                        dst_hi = dst_lo + (src_hi - src_lo)
-                        if dst_hi <= dst_lo:
-                            continue
-                        wt_frag = wt[0, :, orig_start + src_lo:
-                                            orig_start + src_hi]
-                        knockins[:, :, dst_lo:dst_hi] = wt_frag
+                # build knock-ins: place WT motif(s) into shuffled bg
+                knockins = shuf.clone()
+                if len(motif_info) == 1:
+                    group_offset = suff_pos - (motif_info[0]['start']
+                                               + motif_info[0]['end']) // 2
+                else:
+                    group_lo = min(m['start'] for m in motif_info)
+                    group_hi = max(m['end'] for m in motif_info)
+                    group_center = (group_lo + group_hi) // 2
+                    group_offset = suff_pos - group_center
 
-                    ki_preds = self._predict_tensor(knockins, models=models,
-                                                    batch_size=batch_size)
-                    scores = {}
-                    for ct in self.cell_types:
-                        scores[ct] = float(ki_preds[ct].mean()
-                                           - shuf_preds[ct].mean())
+                for m in motif_info:
+                    orig_start, orig_end = m['start'], m['end']
+                    motif_len = orig_end - orig_start
+                    new_start = orig_start + group_offset
+                    src_lo = max(0, -new_start)
+                    src_hi = motif_len - max(0,
+                                             (new_start + motif_len)
+                                             - ENHANCER_LEN)
+                    dst_lo = max(0, new_start)
+                    dst_hi = dst_lo + (src_hi - src_lo)
+                    if dst_hi <= dst_lo:
+                        continue
+                    wt_frag = wt[0, :, orig_start + src_lo:
+                                        orig_start + src_hi]
+                    knockins[:, :, dst_lo:dst_hi] = wt_frag
 
-                    results[si].append({
-                        'motifs': motif_info,
-                        'order': order,
-                        'scores': scores,
-                    })
+                all_knockins.append(knockins)
+
+            if not all_knockins:
+                continue
+
+            # single prediction call for all combos
+            all_knockins = torch.cat(all_knockins, dim=0)
+            all_preds = self._predict_tensor(all_knockins, models=models,
+                                             batch_size=batch_size)
+
+            # slice results back per combo
+            for ci, (order, motif_info) in enumerate(combo_info):
+                scores = {}
+                for ct in self.cell_types:
+                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                    scores[ct] = float(vals.mean() - shuf_preds[ct].mean())
+                results[si].append({
+                    'motifs': motif_info,
+                    'order': order,
+                    'scores': scores,
+                })
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
@@ -1286,7 +1315,10 @@ class EigenMap:
             chimeras = torch.cat(chimeras, dim=0)  # (n_coalitions * n_shuffles, 4, L)
 
             # single prediction call per cell type
-            all_preds = self._predict_tensor(chimeras, batch_size=batch_size)
+            if not hasattr(self, '_sii_models'):
+                self._sii_models = self._load_models()
+            all_preds = self._predict_tensor(chimeras, models=self._sii_models,
+                                             batch_size=batch_size)
 
             # reshape to (n_coalitions, n_shuffles) and average over shuffles
             coalition_values = {}  # tuple -> {ct: float}
