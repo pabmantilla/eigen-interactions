@@ -1497,13 +1497,10 @@ class EigenMap:
                         for j in range(n_motifs):
                             if not coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
-                                for k in range(n_rep):
-                                    expanded[k, :, s:e] = shuf[k, :, s:e]
+                                expanded[:, :, s:e] = shuf[:, :, s:e]
                         # background player
                         if not coal[n_motifs]:
-                            for k in range(n_rep):
-                                for p in bg_positions:
-                                    expanded[k, :, p] = shuf[k, :, p]
+                            expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
                         # promoter player
                         if not coal[n_motifs + 1]:
                             for k in range(n_rep):
@@ -1518,8 +1515,7 @@ class EigenMap:
                                 expanded[:, :, s:e] = wt[0, :, s:e]
                         # background player
                         if coal[n_motifs]:
-                            for p in bg_positions:
-                                expanded[:, :, p] = wt[0, :, p]
+                            expanded[:, :, bg_positions] = wt[0, :, bg_positions]
                         # promoter player
                         if coal[n_motifs + 1]:
                             expanded[:, :, ENHANCER_LEN:TOTAL_LEN] = \
