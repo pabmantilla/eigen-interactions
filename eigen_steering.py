@@ -1372,8 +1372,10 @@ class EigenMap:
                 'n_motifs': n_motifs,
             }
 
-            print(f"  seq {si}: {n_motifs} motifs, {n_coalitions} coalitions, "
-                  f"order {order} -> {len(interactions)} interaction terms")
+            done = idxs.index(si) + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  shapley: {done}/{len(idxs)} sequences", end='\r')
+        print()
 
         return results
 
