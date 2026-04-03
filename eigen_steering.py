@@ -1231,13 +1231,20 @@ class EigenMap:
         return results
 
     def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
-                                  batch_size=128, random_state=None):
-        """Shapley Interaction Indices for motifs via necessity (KO) game.
+                                  batch_size=128, random_state=None,
+                                  mode='necessity'):
+        """Shapley Interaction Indices for motifs via necessity or sufficiency game.
 
         For each sequence, computes the k-SII up to max_order using the
-        shapiq library.  The value function is necessity-based: v(S) is the
-        prediction when only motifs in coalition S are intact (motifs NOT
-        in S are replaced with dinucleotide-shuffled content).
+        shapiq library.
+
+        In necessity mode (default), v(S) is the prediction when only motifs
+        in coalition S are intact (motifs NOT in S are replaced with
+        dinucleotide-shuffled content).
+
+        In sufficiency mode, v(S) is the prediction when starting from a
+        fully shuffled background and only motifs IN coalition S are knocked
+        in from the WT sequence.
 
         All chimeras for a sequence are built at once and scored in a single
         _predict_tensor call per cell type, then fed to shapiq as a
@@ -1255,6 +1262,8 @@ class EigenMap:
             Prediction batch size.
         random_state : int or None
             Seed for reproducibility.
+        mode : str
+            'necessity' (KO game) or 'sufficiency' (KI game).
 
         Returns
         -------
@@ -1266,6 +1275,8 @@ class EigenMap:
                                  {ct: avg_prediction}
             'n_motifs'         : int
         """
+        assert mode in ('necessity', 'sufficiency'), \
+            f"mode must be 'necessity' or 'sufficiency', got '{mode}'"
         import shapiq
 
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
@@ -1310,12 +1321,21 @@ class EigenMap:
                 # build all chimeras: (n_coalitions * n_rep, 4, L)
                 chimeras = []
                 for coal in all_coalitions:
-                    ko_indices = [j for j in range(n_motifs) if not coal[j]]
-                    expanded = wt.expand(n_rep, -1, -1).clone()
-                    for k in range(n_rep):
-                        for j in ko_indices:
+                    if mode == 'necessity':
+                        # start from WT, knock OUT motifs not in coalition
+                        ko_indices = [j for j in range(n_motifs) if not coal[j]]
+                        expanded = wt.expand(n_rep, -1, -1).clone()
+                        for k in range(n_rep):
+                            for j in ko_indices:
+                                s, e = positions[j]['start'], positions[j]['end']
+                                expanded[k, :, s:e] = shuf[k, :, s:e]
+                    else:
+                        # sufficiency: start from shuffled, knock IN coalition motifs
+                        ki_indices = [j for j in range(n_motifs) if coal[j]]
+                        expanded = shuf.clone()
+                        for j in ki_indices:
                             s, e = positions[j]['start'], positions[j]['end']
-                            expanded[k, :, s:e] = shuf[k, :, s:e]
+                            expanded[:, :, s:e] = wt[0, :, s:e]
                     chimeras.append(expanded)
 
                 chimeras = torch.cat(chimeras, dim=0)
@@ -1374,7 +1394,8 @@ class EigenMap:
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
-                print(f"  shapley: {done}/{len(idxs)} sequences", end='\r')
+                print(f"  shapley ({mode}): {done}/{len(idxs)} sequences",
+                      end='\r')
         print()
 
         del models
