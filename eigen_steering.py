@@ -1225,7 +1225,7 @@ class EigenMap:
         torch.cuda.empty_cache()
         return results
 
-    def shapley_interaction_index(self, seq_idx=None, max_order=2, n_shuffles=20,
+    def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
                                   batch_size=128, random_state=None):
         """Shapley Interaction Indices for motifs via necessity (KO) game.
 
@@ -1244,7 +1244,7 @@ class EigenMap:
             Sequence index/indices.  None = all.
         max_order : int
             Maximum interaction order for k-SII (default 2 = pairwise).
-        n_shuffles : int
+        n_rep : int
             Dinucleotide-shuffled replicates per coalition.
         batch_size : int
             Prediction batch size.
@@ -1288,8 +1288,8 @@ class EigenMap:
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
-            # shuffled backgrounds: (n_shuffles, 4, L)
-            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+            # shuffled backgrounds: (n_rep, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_rep,
                                         random_state=random_state)[0]
 
             # enumerate all 2^n coalitions as binary masks
@@ -1299,20 +1299,20 @@ class EigenMap:
             )  # (2^n, n_motifs)
             n_coalitions = len(all_coalitions)
 
-            # build all chimeras: (n_coalitions * n_shuffles, 4, L)
+            # build all chimeras: (n_coalitions * n_rep, 4, L)
             chimeras = []
             for coal in all_coalitions:
                 # coal[j] = True means motif j is KEPT (intact)
                 # motifs NOT in coalition get shuffled content
                 ko_indices = [j for j in range(n_motifs) if not coal[j]]
-                expanded = wt.expand(n_shuffles, -1, -1).clone()
-                for k in range(n_shuffles):
+                expanded = wt.expand(n_rep, -1, -1).clone()
+                for k in range(n_rep):
                     for j in ko_indices:
                         s, e = positions[j]['start'], positions[j]['end']
                         expanded[k, :, s:e] = shuf[k, :, s:e]
                 chimeras.append(expanded)
 
-            chimeras = torch.cat(chimeras, dim=0)  # (n_coalitions * n_shuffles, 4, L)
+            chimeras = torch.cat(chimeras, dim=0)  # (n_coalitions * n_rep, 4, L)
 
             # single prediction call per cell type
             if not hasattr(self, '_sii_models'):
@@ -1320,13 +1320,13 @@ class EigenMap:
             all_preds = self._predict_tensor(chimeras, models=self._sii_models,
                                              batch_size=batch_size)
 
-            # reshape to (n_coalitions, n_shuffles) and average over shuffles
+            # reshape to (n_coalitions, n_rep) and average over shuffles
             coalition_values = {}  # tuple -> {ct: float}
             for ci, coal in enumerate(all_coalitions):
                 key = tuple(int(x) for x in coal)
                 coalition_values[key] = {}
                 for ct in self.cell_types:
-                    vals = all_preds[ct][ci * n_shuffles:(ci + 1) * n_shuffles]
+                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
                     coalition_values[key][ct] = float(vals.mean())
 
             # compute SII per cell type using shapiq
