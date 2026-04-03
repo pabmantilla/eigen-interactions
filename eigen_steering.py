@@ -1402,6 +1402,195 @@ class EigenMap:
         torch.cuda.empty_cache()
         return results
 
+    def shapley_interaction_index_context(self, seq_idx=None, max_order=2,
+                                          n_rep=20, batch_size=128,
+                                          random_state=None,
+                                          mode='necessity'):
+        """Shapley Interaction Indices with background and promoter as extra players.
+
+        Same as shapley_interaction_index but the player set is expanded:
+        - Players 0..M-1: annotated motifs
+        - Player M: background (enhancer positions not covered by any motif)
+        - Player M+1: promoter (positions 230..280)
+
+        Parameters
+        ----------
+        seq_idx : int, list[int], or None
+            Sequence index/indices.  None = all.
+        max_order : int
+            Maximum interaction order for k-SII (default 2).
+        n_rep : int
+            Dinucleotide-shuffled replicates per coalition.
+        batch_size : int
+            Prediction batch size.
+        random_state : int or None
+            Seed for reproducibility.
+        mode : str
+            'necessity' (KO game) or 'sufficiency' (KI game).
+
+        Returns
+        -------
+        list of dict (one per sequence index), each with:
+            'motifs'           : list of player names (motif TFs + 'background' + 'promoter')
+            'player_types'     : list like ['motif', ..., 'background', 'promoter']
+            'interactions'     : dict mapping tuples of player indices -> {ct: sii_score}
+            'coalition_values' : dict mapping coalition tuples -> {ct: avg_prediction}
+            'n_players'        : int
+        """
+        assert mode in ('necessity', 'sufficiency'), \
+            f"mode must be 'necessity' or 'sufficiency', got '{mode}'"
+        import shapiq
+
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        idxs = self._resolve_seq_idxs(seq_idx)
+        results = [None] * len(self.constructs)
+        models = self._load_models()
+
+        for si in idxs:
+            # WT one-hot: (1, 4, L)
+            wt = self.X[si:si+1].float()
+
+            # shuffled backgrounds: (n_rep, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_rep,
+                                        random_state=random_state)[0]
+
+            results[si] = {}
+
+            for act in self.cell_types:
+                positions = self._collect_motif_positions(si, ct=act)
+                n_motifs = len(positions)
+
+                # Build background mask: enhancer positions not in any motif
+                motif_mask = np.zeros(ENHANCER_LEN, dtype=bool)
+                for pos in positions:
+                    motif_mask[pos['start']:pos['end']] = True
+                bg_positions = np.where(~motif_mask)[0]
+
+                # Promoter positions
+                prom_positions = np.arange(ENHANCER_LEN, TOTAL_LEN)
+
+                n_players = n_motifs + 2
+
+                # Player names and types
+                motif_names = [
+                    pos['tf_names'][0] if pos['tf_names'] else '?'
+                    for pos in positions
+                ]
+                player_names = motif_names + ['background', 'promoter']
+                player_types = ['motif'] * n_motifs + ['background', 'promoter']
+
+                order = min(max_order, n_players)
+
+                # enumerate all 2^n_players coalitions as binary masks
+                all_coalitions = np.array(
+                    list(itertools.product([0, 1], repeat=n_players)),
+                    dtype=bool,
+                )
+                n_coalitions = len(all_coalitions)
+
+                # build all chimeras: (n_coalitions * n_rep, 4, L)
+                chimeras = []
+                for coal in all_coalitions:
+                    if mode == 'necessity':
+                        # start from WT, knock OUT players not in coalition
+                        expanded = wt.expand(n_rep, -1, -1).clone()
+                        for j in range(n_motifs):
+                            if not coal[j]:
+                                s, e = positions[j]['start'], positions[j]['end']
+                                for k in range(n_rep):
+                                    expanded[k, :, s:e] = shuf[k, :, s:e]
+                        # background player
+                        if not coal[n_motifs]:
+                            for k in range(n_rep):
+                                for p in bg_positions:
+                                    expanded[k, :, p] = shuf[k, :, p]
+                        # promoter player
+                        if not coal[n_motifs + 1]:
+                            for k in range(n_rep):
+                                expanded[k, :, ENHANCER_LEN:TOTAL_LEN] = \
+                                    shuf[k, :, ENHANCER_LEN:TOTAL_LEN]
+                    else:
+                        # sufficiency: start from shuffled, knock IN coalition players
+                        expanded = shuf.clone()
+                        for j in range(n_motifs):
+                            if coal[j]:
+                                s, e = positions[j]['start'], positions[j]['end']
+                                expanded[:, :, s:e] = wt[0, :, s:e]
+                        # background player
+                        if coal[n_motifs]:
+                            for p in bg_positions:
+                                expanded[:, :, p] = wt[0, :, p]
+                        # promoter player
+                        if coal[n_motifs + 1]:
+                            expanded[:, :, ENHANCER_LEN:TOTAL_LEN] = \
+                                wt[0, :, ENHANCER_LEN:TOTAL_LEN]
+                    chimeras.append(expanded)
+
+                chimeras = torch.cat(chimeras, dim=0)
+                all_preds = self._predict_tensor(chimeras, models=models,
+                                                 batch_size=batch_size)
+
+                # reshape to (n_coalitions, n_rep) and average over shuffles
+                coalition_values = {}
+                for ci, coal in enumerate(all_coalitions):
+                    key = tuple(int(x) for x in coal)
+                    coalition_values[key] = {}
+                    for ct in self.cell_types:
+                        vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                        coalition_values[key][ct] = float(vals.mean())
+
+                # compute SII per scoring cell type using shapiq
+                interactions = {}
+                for ct in self.cell_types:
+                    _ct = ct
+
+                    def _value_fn(coalitions_binary, _c=_ct):
+                        out = np.zeros(len(coalitions_binary))
+                        for i, coal in enumerate(coalitions_binary):
+                            key = tuple(int(x) for x in coal)
+                            out[i] = coalition_values[key][_c]
+                        return out
+
+                    empty_val = coalition_values[tuple([0] * n_players)][_ct]
+
+                    class PrecomputedGame(shapiq.Game):
+                        def __init__(self_game, nv=empty_val):
+                            super().__init__(
+                                n_players=n_players,
+                                normalization_value=nv,
+                            )
+
+                        def value_function(self_game, coalitions):
+                            return _value_fn(coalitions)
+
+                    game = PrecomputedGame()
+                    exact = shapiq.ExactComputer(n_players=n_players, game=game)
+                    sii_result = exact(index="k-SII", order=order)
+
+                    for interaction_key in sii_result.dict_values:
+                        score = float(sii_result.dict_values[interaction_key])
+                        if interaction_key not in interactions:
+                            interactions[interaction_key] = {}
+                        interactions[interaction_key][ct] = score
+
+                results[si][act] = {
+                    'motifs': player_names,
+                    'player_types': player_types,
+                    'interactions': interactions,
+                    'coalition_values': coalition_values,
+                    'n_players': n_players,
+                }
+
+            done = idxs.index(si) + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  shapley context ({mode}): {done}/{len(idxs)} sequences",
+                      end='\r')
+        print()
+
+        del models
+        torch.cuda.empty_cache()
+        return results
+
     def _resolve_seq_idxs(self, seq_idx):
         """Normalise seq_idx arg to a list of ints."""
         if seq_idx is None:
