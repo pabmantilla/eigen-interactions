@@ -1072,8 +1072,10 @@ class EigenMap:
                         'scores': scores,
                     })
 
-            print(f"  seq {si}: {len(positions)} motifs, "
-                  f"orders 1..{max_order} -> {len(results[si])} tests")
+            done = idxs.index(si) + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  necessity: {done}/{len(idxs)} sequences", end='\r')
+        print()
 
         del models
         torch.cuda.empty_cache()
@@ -1185,8 +1187,10 @@ class EigenMap:
                         'scores': scores,
                     })
 
-            print(f"  seq {si}: {len(positions)} motifs, "
-                  f"orders 1..{max_order} -> {len(results[si])} tests")
+            done = idxs.index(si) + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  sufficiency: {done}/{len(idxs)} sequences", end='\r')
+        print()
 
         del models
         torch.cuda.empty_cache()
