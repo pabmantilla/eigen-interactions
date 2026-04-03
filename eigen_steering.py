@@ -1017,6 +1017,7 @@ class EigenMap:
         Returns
         -------
         list (per sequence) of list[dict] with keys:
+            'annotation_ct' : str — which cell type's motif annotations
             'motifs' : list[dict] with 'start','end','tf' for each
                        motif in the combination
             'order'  : int (1, 2, …)
@@ -1028,11 +1029,6 @@ class EigenMap:
         models = self._load_models()
 
         for si in idxs:
-            positions = self._collect_motif_positions(si)
-            if not positions:
-                continue
-            max_order = min(nec_order, len(positions))
-
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
@@ -1044,48 +1040,55 @@ class EigenMap:
             wt_preds = self._predict_tensor(wt, models=models,
                                             batch_size=batch_size)
 
-            # enumerate all combos and build all chimeras at once
-            combos = []
-            for order in range(1, max_order + 1):
-                for combo in itertools.combinations(range(len(positions)), order):
-                    combos.append(combo)
+            for act in self.cell_types:
+                positions = self._collect_motif_positions(si, ct=act)
+                if not positions:
+                    continue
+                max_order = min(nec_order, len(positions))
 
-            all_chimeras = []
-            combo_info = []
-            for combo in combos:
-                motif_info = [{'start': positions[j]['start'],
-                               'end': positions[j]['end'],
-                               'tf': positions[j]['tf_names'][0]
-                                     if positions[j]['tf_names'] else '?'}
-                              for j in combo]
-                combo_info.append((len(combo), motif_info))
+                # enumerate all combos and build all chimeras at once
+                combos = []
+                for order in range(1, max_order + 1):
+                    for combo in itertools.combinations(range(len(positions)), order):
+                        combos.append(combo)
 
-                chimeras = wt.expand(n_rep, -1, -1).clone()
-                for k in range(n_rep):
-                    for m in motif_info:
-                        s, e = m['start'], m['end']
-                        chimeras[k, :, s:e] = shuf[k, :, s:e]
-                all_chimeras.append(chimeras)
+                all_chimeras = []
+                combo_info = []
+                for combo in combos:
+                    motif_info = [{'start': positions[j]['start'],
+                                   'end': positions[j]['end'],
+                                   'tf': positions[j]['tf_names'][0]
+                                         if positions[j]['tf_names'] else '?'}
+                                  for j in combo]
+                    combo_info.append((len(combo), motif_info))
 
-            if not all_chimeras:
-                continue
+                    chimeras = wt.expand(n_rep, -1, -1).clone()
+                    for k in range(n_rep):
+                        for m in motif_info:
+                            s, e = m['start'], m['end']
+                            chimeras[k, :, s:e] = shuf[k, :, s:e]
+                    all_chimeras.append(chimeras)
 
-            # single prediction call for all combos
-            all_chimeras = torch.cat(all_chimeras, dim=0)
-            all_preds = self._predict_tensor(all_chimeras, models=models,
-                                             batch_size=batch_size)
+                if not all_chimeras:
+                    continue
 
-            # slice results back per combo
-            for ci, (order, motif_info) in enumerate(combo_info):
-                scores = {}
-                for ct in self.cell_types:
-                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
-                    scores[ct] = float(vals.mean() - wt_preds[ct][0])
-                results[si].append({
-                    'motifs': motif_info,
-                    'order': order,
-                    'scores': scores,
-                })
+                # single prediction call for all combos
+                all_chimeras = torch.cat(all_chimeras, dim=0)
+                all_preds = self._predict_tensor(all_chimeras, models=models,
+                                                 batch_size=batch_size)
+
+                # slice results back per combo
+                for ci, (order, motif_info) in enumerate(combo_info):
+                    scores = {}
+                    for ct in self.cell_types:
+                        vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                        scores[ct] = float(vals.mean() - wt_preds[ct][0])
+                    results[si].append({
+                        'annotation_ct': act,
+                        'motifs': motif_info,
+                        'order': order,
+                        'scores': scores,
+                    })
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
@@ -1136,11 +1139,6 @@ class EigenMap:
         models = self._load_models()
 
         for si in idxs:
-            positions = self._collect_motif_positions(si)
-            if not positions:
-                continue
-            max_order = min(suf_order, len(positions))
-
             wt = self.X[si:si+1].float()
 
             # shuffled backgrounds: (n_rep, 4, L)
@@ -1151,70 +1149,77 @@ class EigenMap:
             shuf_preds = self._predict_tensor(shuf, models=models,
                                               batch_size=batch_size)
 
-            # enumerate all combos and build all knock-ins at once
-            combos = []
-            for order in range(1, max_order + 1):
-                for combo in itertools.combinations(range(len(positions)), order):
-                    combos.append(combo)
+            for act in self.cell_types:
+                positions = self._collect_motif_positions(si, ct=act)
+                if not positions:
+                    continue
+                max_order = min(suf_order, len(positions))
 
-            all_knockins = []
-            combo_info = []
-            for combo in combos:
-                motif_info = [{'start': positions[j]['start'],
-                               'end': positions[j]['end'],
-                               'tf': positions[j]['tf_names'][0]
-                                     if positions[j]['tf_names'] else '?'}
-                              for j in combo]
-                combo_info.append((len(combo), motif_info))
+                # enumerate all combos and build all knock-ins at once
+                combos = []
+                for order in range(1, max_order + 1):
+                    for combo in itertools.combinations(range(len(positions)), order):
+                        combos.append(combo)
 
-                # build knock-ins: place WT motif(s) into shuffled bg
-                knockins = shuf.clone()
-                if len(motif_info) == 1:
-                    group_offset = suff_pos - (motif_info[0]['start']
-                                               + motif_info[0]['end']) // 2
-                else:
-                    group_lo = min(m['start'] for m in motif_info)
-                    group_hi = max(m['end'] for m in motif_info)
-                    group_center = (group_lo + group_hi) // 2
-                    group_offset = suff_pos - group_center
+                all_knockins = []
+                combo_info = []
+                for combo in combos:
+                    motif_info = [{'start': positions[j]['start'],
+                                   'end': positions[j]['end'],
+                                   'tf': positions[j]['tf_names'][0]
+                                         if positions[j]['tf_names'] else '?'}
+                                  for j in combo]
+                    combo_info.append((len(combo), motif_info))
 
-                for m in motif_info:
-                    orig_start, orig_end = m['start'], m['end']
-                    motif_len = orig_end - orig_start
-                    new_start = orig_start + group_offset
-                    src_lo = max(0, -new_start)
-                    src_hi = motif_len - max(0,
-                                             (new_start + motif_len)
-                                             - ENHANCER_LEN)
-                    dst_lo = max(0, new_start)
-                    dst_hi = dst_lo + (src_hi - src_lo)
-                    if dst_hi <= dst_lo:
-                        continue
-                    wt_frag = wt[0, :, orig_start + src_lo:
-                                        orig_start + src_hi]
-                    knockins[:, :, dst_lo:dst_hi] = wt_frag
+                    # build knock-ins: place WT motif(s) into shuffled bg
+                    knockins = shuf.clone()
+                    if len(motif_info) == 1:
+                        group_offset = suff_pos - (motif_info[0]['start']
+                                                   + motif_info[0]['end']) // 2
+                    else:
+                        group_lo = min(m['start'] for m in motif_info)
+                        group_hi = max(m['end'] for m in motif_info)
+                        group_center = (group_lo + group_hi) // 2
+                        group_offset = suff_pos - group_center
 
-                all_knockins.append(knockins)
+                    for m in motif_info:
+                        orig_start, orig_end = m['start'], m['end']
+                        motif_len = orig_end - orig_start
+                        new_start = orig_start + group_offset
+                        src_lo = max(0, -new_start)
+                        src_hi = motif_len - max(0,
+                                                 (new_start + motif_len)
+                                                 - ENHANCER_LEN)
+                        dst_lo = max(0, new_start)
+                        dst_hi = dst_lo + (src_hi - src_lo)
+                        if dst_hi <= dst_lo:
+                            continue
+                        wt_frag = wt[0, :, orig_start + src_lo:
+                                            orig_start + src_hi]
+                        knockins[:, :, dst_lo:dst_hi] = wt_frag
 
-            if not all_knockins:
-                continue
+                    all_knockins.append(knockins)
 
-            # single prediction call for all combos
-            all_knockins = torch.cat(all_knockins, dim=0)
-            all_preds = self._predict_tensor(all_knockins, models=models,
-                                             batch_size=batch_size)
+                if not all_knockins:
+                    continue
 
-            # slice results back per combo
-            for ci, (order, motif_info) in enumerate(combo_info):
-                scores = {}
-                for ct in self.cell_types:
-                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
-                    scores[ct] = float(vals.mean() - shuf_preds[ct].mean())
-                results[si].append({
-                    'motifs': motif_info,
-                    'order': order,
-                    'scores': scores,
-                })
+                # single prediction call for all combos
+                all_knockins = torch.cat(all_knockins, dim=0)
+                all_preds = self._predict_tensor(all_knockins, models=models,
+                                                 batch_size=batch_size)
+
+                # slice results back per combo
+                for ci, (order, motif_info) in enumerate(combo_info):
+                    scores = {}
+                    for ct in self.cell_types:
+                        vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                        scores[ct] = float(vals.mean() - shuf_preds[ct].mean())
+                    results[si].append({
+                        'annotation_ct': act,
+                        'motifs': motif_info,
+                        'order': order,
+                        'scores': scores,
+                    })
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
@@ -1266,25 +1271,9 @@ class EigenMap:
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [None] * len(self.constructs)
+        models = self._load_models()
 
         for si in idxs:
-            positions = self._collect_motif_positions(si)
-            n_motifs = len(positions)
-            if n_motifs == 0:
-                results[si] = {
-                    'motifs': [], 'interactions': {}, 'coalition_values': {},
-                    'n_motifs': 0,
-                }
-                continue
-
-            order = min(max_order, n_motifs)
-
-            # motif names
-            motif_names = [
-                pos['tf_names'][0] if pos['tf_names'] else '?'
-                for pos in positions
-            ]
-
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
@@ -1292,91 +1281,104 @@ class EigenMap:
             shuf = dinucleotide_shuffle(wt, n=n_rep,
                                         random_state=random_state)[0]
 
-            # enumerate all 2^n coalitions as binary masks
-            all_coalitions = np.array(
-                list(itertools.product([0, 1], repeat=n_motifs)),
-                dtype=bool,
-            )  # (2^n, n_motifs)
-            n_coalitions = len(all_coalitions)
+            results[si] = {}
 
-            # build all chimeras: (n_coalitions * n_rep, 4, L)
-            chimeras = []
-            for coal in all_coalitions:
-                # coal[j] = True means motif j is KEPT (intact)
-                # motifs NOT in coalition get shuffled content
-                ko_indices = [j for j in range(n_motifs) if not coal[j]]
-                expanded = wt.expand(n_rep, -1, -1).clone()
-                for k in range(n_rep):
-                    for j in ko_indices:
-                        s, e = positions[j]['start'], positions[j]['end']
-                        expanded[k, :, s:e] = shuf[k, :, s:e]
-                chimeras.append(expanded)
+            for act in self.cell_types:
+                positions = self._collect_motif_positions(si, ct=act)
+                n_motifs = len(positions)
+                if n_motifs == 0:
+                    results[si][act] = {
+                        'motifs': [], 'interactions': {},
+                        'coalition_values': {}, 'n_motifs': 0,
+                    }
+                    continue
 
-            chimeras = torch.cat(chimeras, dim=0)  # (n_coalitions * n_rep, 4, L)
+                order = min(max_order, n_motifs)
 
-            # single prediction call per cell type
-            if not hasattr(self, '_sii_models'):
-                self._sii_models = self._load_models()
-            all_preds = self._predict_tensor(chimeras, models=self._sii_models,
-                                             batch_size=batch_size)
+                motif_names = [
+                    pos['tf_names'][0] if pos['tf_names'] else '?'
+                    for pos in positions
+                ]
 
-            # reshape to (n_coalitions, n_rep) and average over shuffles
-            coalition_values = {}  # tuple -> {ct: float}
-            for ci, coal in enumerate(all_coalitions):
-                key = tuple(int(x) for x in coal)
-                coalition_values[key] = {}
+                # enumerate all 2^n coalitions as binary masks
+                all_coalitions = np.array(
+                    list(itertools.product([0, 1], repeat=n_motifs)),
+                    dtype=bool,
+                )
+                n_coalitions = len(all_coalitions)
+
+                # build all chimeras: (n_coalitions * n_rep, 4, L)
+                chimeras = []
+                for coal in all_coalitions:
+                    ko_indices = [j for j in range(n_motifs) if not coal[j]]
+                    expanded = wt.expand(n_rep, -1, -1).clone()
+                    for k in range(n_rep):
+                        for j in ko_indices:
+                            s, e = positions[j]['start'], positions[j]['end']
+                            expanded[k, :, s:e] = shuf[k, :, s:e]
+                    chimeras.append(expanded)
+
+                chimeras = torch.cat(chimeras, dim=0)
+                all_preds = self._predict_tensor(chimeras, models=models,
+                                                 batch_size=batch_size)
+
+                # reshape to (n_coalitions, n_rep) and average over shuffles
+                coalition_values = {}
+                for ci, coal in enumerate(all_coalitions):
+                    key = tuple(int(x) for x in coal)
+                    coalition_values[key] = {}
+                    for ct in self.cell_types:
+                        vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
+                        coalition_values[key][ct] = float(vals.mean())
+
+                # compute SII per scoring cell type using shapiq
+                interactions = {}
                 for ct in self.cell_types:
-                    vals = all_preds[ct][ci * n_rep:(ci + 1) * n_rep]
-                    coalition_values[key][ct] = float(vals.mean())
+                    _ct = ct
 
-            # compute SII per cell type using shapiq
-            interactions = {}
-            for ct in self.cell_types:
-                _ct = ct  # capture for closures below
+                    def _value_fn(coalitions_binary, _c=_ct):
+                        out = np.zeros(len(coalitions_binary))
+                        for i, coal in enumerate(coalitions_binary):
+                            key = tuple(int(x) for x in coal)
+                            out[i] = coalition_values[key][_c]
+                        return out
 
-                # build lookup array aligned with shapiq coalition ordering
-                def _value_fn(coalitions_binary, _c=_ct):
-                    out = np.zeros(len(coalitions_binary))
-                    for i, coal in enumerate(coalitions_binary):
-                        key = tuple(int(x) for x in coal)
-                        out[i] = coalition_values[key][_c]
-                    return out
+                    empty_val = coalition_values[tuple([0] * n_motifs)][_ct]
 
-                empty_val = coalition_values[tuple([0] * n_motifs)][_ct]
+                    class PrecomputedGame(shapiq.Game):
+                        def __init__(self_game, nv=empty_val):
+                            super().__init__(
+                                n_players=n_motifs,
+                                normalization_value=nv,
+                            )
 
-                class PrecomputedGame(shapiq.Game):
-                    def __init__(self_game, nv=empty_val):
-                        super().__init__(
-                            n_players=n_motifs,
-                            normalization_value=nv,
-                        )
+                        def value_function(self_game, coalitions):
+                            return _value_fn(coalitions)
 
-                    def value_function(self_game, coalitions):
-                        return _value_fn(coalitions)
+                    game = PrecomputedGame()
+                    exact = shapiq.ExactComputer(n_players=n_motifs, game=game)
+                    sii_result = exact(index="k-SII", order=order)
 
-                game = PrecomputedGame()
-                exact = shapiq.ExactComputer(n_players=n_motifs, game=game)
-                sii_result = exact(index="k-SII", order=order)
+                    for interaction_key in sii_result.dict_values:
+                        score = float(sii_result.dict_values[interaction_key])
+                        if interaction_key not in interactions:
+                            interactions[interaction_key] = {}
+                        interactions[interaction_key][ct] = score
 
-                # extract interaction values
-                for interaction_key in sii_result.dict_values:
-                    score = float(sii_result.dict_values[interaction_key])
-                    if interaction_key not in interactions:
-                        interactions[interaction_key] = {}
-                    interactions[interaction_key][ct] = score
-
-            results[si] = {
-                'motifs': motif_names,
-                'interactions': interactions,
-                'coalition_values': coalition_values,
-                'n_motifs': n_motifs,
-            }
+                results[si][act] = {
+                    'motifs': motif_names,
+                    'interactions': interactions,
+                    'coalition_values': coalition_values,
+                    'n_motifs': n_motifs,
+                }
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
                 print(f"  shapley: {done}/{len(idxs)} sequences", end='\r')
         print()
 
+        del models
+        torch.cuda.empty_cache()
         return results
 
     def _resolve_seq_idxs(self, seq_idx):
@@ -1711,17 +1713,21 @@ class EigenMap:
                                          for ct in self.cell_types), reverse=True)
         return paralogs[:max_paralogs]
 
-    def _collect_motif_positions(self, seq_idx):
-        """Merge motif hits across cell types into unique positions.
+    def _collect_motif_positions(self, seq_idx, ct=None):
+        """Merge motif hits into unique positions.
+
+        When ct is given, only collect hits from that cell type.
+        When ct is None, merge across all cell types (original behavior).
 
         Overlapping seqlet intervals are merged. TF superset is the union
-        of top hits from every cell type, sorted by best p-value.
+        of top hits, sorted by best p-value.
         """
+        cts = [ct] if ct is not None else self.cell_types
         raw = []
-        for ct in self.cell_types:
-            for h in self.motif_hits[ct][seq_idx]:
+        for c in cts:
+            for h in self.motif_hits[c][seq_idx]:
                 raw.append({
-                    'start': h['start'], 'end': h['end'], 'ct': ct,
+                    'start': h['start'], 'end': h['end'], 'ct': c,
                     'top_hits': h.get('top_hits',
                                       [{'tf': h['tf'], 'pval': h['pval']}]),
                 })
