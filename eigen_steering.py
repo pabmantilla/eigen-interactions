@@ -962,25 +962,35 @@ class EigenMap:
             torch.cuda.empty_cache()
         return preds
 
-    def _predict_tensor(self, X_tensor, cell_type=None, batch_size=64):
-        """Forward pass on a (N, 4, L) float tensor. Returns {ct: np.ndarray}."""
-        cts = [cell_type] if cell_type else self.cell_types
+    def _predict_tensor(self, X_tensor, models=None, batch_size=64):
+        """Forward pass on a (N, 4, L) float tensor. Returns {ct: np.ndarray}.
+
+        Parameters
+        ----------
+        models : dict[str, nn.Module] or None
+            Pre-loaded {ct: model} dict.  When None, loads models on the fly.
+        """
         preds = {}
-        for ct in cts:
-            model = self._load_model(ct, squeeze=True)
+        for ct in self.cell_types:
+            model = models[ct] if models else self._load_model(ct, squeeze=True)
             chunks = []
             with torch.no_grad():
                 for i in range(0, len(X_tensor), batch_size):
                     batch = X_tensor[i:i+batch_size].to(self.device)
                     chunks.append(model(batch).cpu().numpy())
             preds[ct] = np.concatenate(chunks)
-            del model
-            torch.cuda.empty_cache()
+            if not models:
+                del model
+                torch.cuda.empty_cache()
         return preds
+
+    def _load_models(self):
+        """Load all cell-type models once. Returns {ct: model}."""
+        return {ct: self._load_model(ct, squeeze=True) for ct in self.cell_types}
 
     # ----- necessity / sufficiency tests -----
 
-    def necessity_test(self, seq_idx=None, n_shuffles=20, nec_order=1,
+    def necessity_test(self, seq_idx=None, n_rep=20, nec_order=1,
                        batch_size=64, random_state=None):
         """Necessity test — marginalized local knockout of motif regions.
 
@@ -994,7 +1004,7 @@ class EigenMap:
         ----------
         seq_idx : int, list[int], or None
             Sequence index/indices to test.  None = all sequences.
-        n_shuffles : int
+        n_rep : int
             Number of dinucleotide-shuffled replicates per knockout.
         nec_order : int
             Maximum combinatorial order.  1 = single-motif knockouts,
@@ -1006,16 +1016,16 @@ class EigenMap:
 
         Returns
         -------
-        dict  keyed by cell type, each value is a list (per sequence) of
-              list[dict] with keys:
-                'motifs' : list[dict] with 'start','end','tf' for each
-                           motif in the combination
-                'order'  : int (1, 2, …)
-                'scores' : {ct: float} — mean ΔpredWT for each cell type
+        list (per sequence) of list[dict] with keys:
+            'motifs' : list[dict] with 'start','end','tf' for each
+                       motif in the combination
+            'order'  : int (1, 2, …)
+            'scores' : {ct: float} — mean Δpred from WT for each cell type
         """
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [[] for _ in range(len(self.constructs))]
+        models = self._load_models()
 
         for si in idxs:
             positions = self._collect_motif_positions(si)
@@ -1026,12 +1036,13 @@ class EigenMap:
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
-            # shuffled backgrounds: (1, n_shuffles, 4, L) -> (n_shuffles, 4, L)
-            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+            # shuffled backgrounds: (1, n_rep, 4, L) -> (n_rep, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_rep,
                                         random_state=random_state)[0]
 
             # WT prediction
-            wt_preds = self._predict_tensor(wt, batch_size=batch_size)
+            wt_preds = self._predict_tensor(wt, models=models,
+                                            batch_size=batch_size)
 
             for order in range(1, max_order + 1):
                 for combo in itertools.combinations(range(len(positions)), order):
@@ -1042,13 +1053,13 @@ class EigenMap:
                                   for j in combo]
 
                     # build chimeras: replace motif regions with shuffled
-                    chimeras = wt.expand(n_shuffles, -1, -1).clone()
-                    for k in range(n_shuffles):
+                    chimeras = wt.expand(n_rep, -1, -1).clone()
+                    for k in range(n_rep):
                         for m in motif_info:
                             s, e = m['start'], m['end']
                             chimeras[k, :, s:e] = shuf[k, :, s:e]
 
-                    chi_preds = self._predict_tensor(chimeras,
+                    chi_preds = self._predict_tensor(chimeras, models=models,
                                                      batch_size=batch_size)
                     scores = {}
                     for ct in self.cell_types:
@@ -1064,9 +1075,11 @@ class EigenMap:
             print(f"  seq {si}: {len(positions)} motifs, "
                   f"orders 1..{max_order} -> {len(results[si])} tests")
 
+        del models
+        torch.cuda.empty_cache()
         return results
 
-    def sufficiency_test(self, seq_idx=None, n_shuffles=20, suf_order=1,
+    def sufficiency_test(self, seq_idx=None, n_rep=20, suf_order=1,
                          suff_pos=None, batch_size=64, random_state=None):
         """Sufficiency test — marginalized global knock-in of motif regions.
 
@@ -1080,7 +1093,7 @@ class EigenMap:
         ----------
         seq_idx : int, list[int], or None
             Sequence index/indices.  None = all.
-        n_shuffles : int
+        n_rep : int
             Dinucleotide-shuffled replicates.
         suf_order : int
             Maximum combinatorial order (like nec_order).
@@ -1103,6 +1116,7 @@ class EigenMap:
             suff_pos = ENHANCER_LEN // 2
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [[] for _ in range(len(self.constructs))]
+        models = self._load_models()
 
         for si in idxs:
             positions = self._collect_motif_positions(si)
@@ -1112,12 +1126,13 @@ class EigenMap:
 
             wt = self.X[si:si+1].float()
 
-            # shuffled backgrounds: (n_shuffles, 4, L)
-            shuf = dinucleotide_shuffle(wt, n=n_shuffles,
+            # shuffled backgrounds: (n_rep, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_rep,
                                         random_state=random_state)[0]
 
             # baseline predictions on pure shuffled backgrounds
-            shuf_preds = self._predict_tensor(shuf, batch_size=batch_size)
+            shuf_preds = self._predict_tensor(shuf, models=models,
+                                              batch_size=batch_size)
 
             for order in range(1, max_order + 1):
                 for combo in itertools.combinations(range(len(positions)), order):
@@ -1157,7 +1172,7 @@ class EigenMap:
                                             orig_start + src_hi]
                         knockins[:, :, dst_lo:dst_hi] = wt_frag
 
-                    ki_preds = self._predict_tensor(knockins,
+                    ki_preds = self._predict_tensor(knockins, models=models,
                                                     batch_size=batch_size)
                     scores = {}
                     for ct in self.cell_types:
@@ -1173,6 +1188,8 @@ class EigenMap:
             print(f"  seq {si}: {len(positions)} motifs, "
                   f"orders 1..{max_order} -> {len(results[si])} tests")
 
+        del models
+        torch.cuda.empty_cache()
         return results
 
     def _resolve_seq_idxs(self, seq_idx):
