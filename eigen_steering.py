@@ -18,6 +18,8 @@ Usage:
 import os
 import sys
 import itertools
+import hashlib
+import pickle
 import urllib.request
 try:
     import requests
@@ -988,6 +990,35 @@ class EigenMap:
         """Load all cell-type models once. Returns {ct: model}."""
         return {ct: self._load_model(ct, squeeze=True) for ct in self.cell_types}
 
+    # ----- disk caching helpers -----
+
+    def _cache_key(self, method, **params):
+        """Build a deterministic cache string from method name and params."""
+        parts = [method]
+        for k in sorted(params.keys()):
+            parts.append(f"{k}={params[k]}")
+        parts.append(f"cell_types={sorted(self.cell_types)}")
+        parts.append(f"models={sorted(self.model_names.items())}")
+        parts.append(f"n_seqs={len(self.constructs)}")
+        key = '|'.join(str(p) for p in parts)
+        return hashlib.md5(key.encode()).hexdigest()
+
+    def _load_cache(self, cache_dir, cache_hash, method):
+        path = os.path.join(cache_dir, f'{method}_{cache_hash}.pkl')
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            print(f"  Loaded {method} from cache: {path}")
+            return data
+        return None
+
+    def _save_cache(self, cache_dir, cache_hash, method, data):
+        os.makedirs(cache_dir, exist_ok=True)
+        path = os.path.join(cache_dir, f'{method}_{cache_hash}.pkl')
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+        print(f"  Saved {method} cache: {path}")
+
     # ----- necessity / sufficiency tests -----
 
     def necessity_test(self, seq_idx=None, n_rep=20, nec_order=1,
@@ -1089,6 +1120,56 @@ class EigenMap:
                         'order': order,
                         'scores': scores,
                     })
+
+                # --- background and promoter synthetic players ---
+                covered = set()
+                for pos in positions:
+                    for bp in range(pos['start'], min(pos['end'], ENHANCER_LEN)):
+                        covered.add(bp)
+                bg_positions = sorted(set(range(ENHANCER_LEN)) - covered)
+
+                extra_players = []
+                if bg_positions:
+                    extra_players.append({
+                        'label': 'background',
+                        'positions': bg_positions,
+                        'motif_entry': [{'tf': 'background',
+                                         'start': bg_positions[0],
+                                         'end': bg_positions[-1] + 1}],
+                    })
+                extra_players.append({
+                    'label': 'promoter',
+                    'positions': list(range(ENHANCER_LEN, TOTAL_LEN)),
+                    'motif_entry': [{'tf': 'promoter',
+                                     'start': ENHANCER_LEN,
+                                     'end': TOTAL_LEN}],
+                })
+
+                extra_chimeras = []
+                extra_info = []
+                for ep in extra_players:
+                    chimeras = wt.expand(n_rep, -1, -1).clone()
+                    for k in range(n_rep):
+                        for bp in ep['positions']:
+                            chimeras[k, :, bp] = shuf[k, :, bp]
+                    extra_chimeras.append(chimeras)
+                    extra_info.append(ep)
+
+                if extra_chimeras:
+                    extra_chimeras = torch.cat(extra_chimeras, dim=0)
+                    extra_preds = self._predict_tensor(
+                        extra_chimeras, models=models, batch_size=batch_size)
+                    for ei, ep in enumerate(extra_info):
+                        scores = {}
+                        for ct in self.cell_types:
+                            vals = extra_preds[ct][ei * n_rep:(ei + 1) * n_rep]
+                            scores[ct] = float(vals.mean() - wt_preds[ct][0])
+                        results[si].append({
+                            'annotation_ct': act,
+                            'motifs': ep['motif_entry'],
+                            'order': 1,
+                            'scores': scores,
+                        })
 
             done = idxs.index(si) + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
