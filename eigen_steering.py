@@ -943,7 +943,7 @@ class EigenMap:
             seq[e['pos']] = e['alt']
         return ''.join(seq)
 
-    def predict(self, constructs, cell_type=None, batch_size=64):
+    def predict(self, constructs, cell_type=None, batch_size=64, models=None):
         """Forward pass on construct strings. Returns {ct: array}."""
         cts = [cell_type] if cell_type else self.cell_types
         X = []
@@ -953,15 +953,19 @@ class EigenMap:
         X = torch.stack(X)
         preds = {}
         for ct in cts:
-            model = self._load_model(ct, squeeze=True)
+            if models is not None and ct in models:
+                model = models[ct]
+            else:
+                model = self._load_model(ct, squeeze=True)
             chunks = []
             with torch.no_grad():
                 for i in range(0, len(X), batch_size):
                     batch = X[i:i+batch_size].to(self.device)
                     chunks.append(model(batch).cpu().numpy())
             preds[ct] = np.concatenate(chunks)
-            del model
-            torch.cuda.empty_cache()
+            if models is None or ct not in models:
+                del model
+                torch.cuda.empty_cache()
         return preds
 
     def _predict_tensor(self, X_tensor, models=None, batch_size=64):
@@ -1060,7 +1064,7 @@ class EigenMap:
         results = [[] for _ in range(len(self.constructs))]
         models = self._load_models()
 
-        for si in idxs:
+        for idx_i, si in enumerate(idxs):
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
@@ -1181,7 +1185,7 @@ class EigenMap:
                             'scores': scores,
                         })
 
-            done = idxs.index(si) + 1
+            done = idx_i + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
                 print(f"  necessity: {done}/{len(idxs)} sequences", end='\r')
         print()
@@ -1230,7 +1234,7 @@ class EigenMap:
         results = [[] for _ in range(len(self.constructs))]
         models = self._load_models()
 
-        for si in idxs:
+        for idx_i, si in enumerate(idxs):
             wt = self.X[si:si+1].float()
 
             # shuffled backgrounds: (n_rep, 4, L)
@@ -1313,7 +1317,65 @@ class EigenMap:
                         'scores': scores,
                     })
 
-            done = idxs.index(si) + 1
+                # --- background, promoter, barcode synthetic players (KI) ---
+                if not include_context_players:
+                    continue
+                covered = set()
+                for pos in positions:
+                    for bp in range(pos['start'], min(pos['end'], ENHANCER_LEN)):
+                        covered.add(bp)
+                bg_positions = sorted(set(range(ENHANCER_LEN)) - covered)
+
+                extra_players = []
+                if bg_positions:
+                    extra_players.append({
+                        'label': 'background',
+                        'positions': bg_positions,
+                        'motif_entry': [{'tf': 'background',
+                                         'start': bg_positions[0],
+                                         'end': bg_positions[-1] + 1}],
+                    })
+                extra_players.append({
+                    'label': 'promoter',
+                    'positions': list(range(PROMOTER_START, BARCODE_START)),
+                    'motif_entry': [{'tf': 'promoter',
+                                     'start': PROMOTER_START,
+                                     'end': BARCODE_START}],
+                })
+                extra_players.append({
+                    'label': 'barcode',
+                    'positions': list(range(BARCODE_START, TOTAL_LEN)),
+                    'motif_entry': [{'tf': 'barcode',
+                                     'start': BARCODE_START,
+                                     'end': TOTAL_LEN}],
+                })
+
+                extra_knockins = []
+                extra_info = []
+                for ep in extra_players:
+                    knockins = shuf.clone()
+                    for bp in ep['positions']:
+                        knockins[:, :, bp] = wt[0, :, bp]
+                    extra_knockins.append(knockins)
+                    extra_info.append(ep)
+
+                if extra_knockins:
+                    extra_knockins = torch.cat(extra_knockins, dim=0)
+                    extra_preds = self._predict_tensor(
+                        extra_knockins, models=models, batch_size=batch_size)
+                    for ei, ep in enumerate(extra_info):
+                        scores = {}
+                        for ct in self.cell_types:
+                            vals = extra_preds[ct][ei * n_rep:(ei + 1) * n_rep]
+                            scores[ct] = float(vals.mean() - shuf_preds[ct].mean())
+                        results[si].append({
+                            'annotation_ct': act,
+                            'motifs': ep['motif_entry'],
+                            'order': 1,
+                            'scores': scores,
+                        })
+
+            done = idx_i + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
                 print(f"  sufficiency: {done}/{len(idxs)} sequences", end='\r')
         print()
@@ -1377,7 +1439,7 @@ class EigenMap:
         results = [None] * len(self.constructs)
         models = self._load_models()
 
-        for si in idxs:
+        for idx_i, si in enumerate(idxs):
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
@@ -1397,16 +1459,31 @@ class EigenMap:
                     }
                     continue
 
-                order = min(max_order, n_motifs)
-
                 motif_names = [
                     pos['tf_names'][0] if pos['tf_names'] else '?'
                     for pos in positions
                 ]
 
-                # enumerate all 2^n coalitions as binary masks
+                # optionally add context players
+                if include_context_players:
+                    motif_mask = np.zeros(ENHANCER_LEN, dtype=bool)
+                    for pos in positions:
+                        motif_mask[pos['start']:pos['end']] = True
+                    bg_positions = np.where(~motif_mask)[0]
+                    prom_positions = np.arange(PROMOTER_START, BARCODE_START)
+                    barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
+
+                    n_players = n_motifs + 3
+                    player_names = motif_names + ['background', 'promoter', 'barcode']
+                else:
+                    n_players = n_motifs
+                    player_names = motif_names
+
+                order = min(max_order, n_players)
+
+                # enumerate all 2^n_players coalitions as binary masks
                 all_coalitions = np.array(
-                    list(itertools.product([0, 1], repeat=n_motifs)),
+                    list(itertools.product([0, 1], repeat=n_players)),
                     dtype=bool,
                 )
                 n_coalitions = len(all_coalitions)
@@ -1415,20 +1492,33 @@ class EigenMap:
                 chimeras = []
                 for coal in all_coalitions:
                     if mode == 'necessity':
-                        # start from WT, knock OUT motifs not in coalition
-                        ko_indices = [j for j in range(n_motifs) if not coal[j]]
+                        # start from WT, knock OUT players not in coalition
                         expanded = wt.expand(n_rep, -1, -1).clone()
-                        for k in range(n_rep):
-                            for j in ko_indices:
+                        for j in range(n_motifs):
+                            if not coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
-                                expanded[k, :, s:e] = shuf[k, :, s:e]
+                                expanded[:, :, s:e] = shuf[:, :, s:e]
+                        if include_context_players:
+                            if not coal[n_motifs]:
+                                expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
+                            if not coal[n_motifs + 1]:
+                                expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
+                            if not coal[n_motifs + 2]:
+                                expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
                     else:
-                        # sufficiency: start from shuffled, knock IN coalition motifs
-                        ki_indices = [j for j in range(n_motifs) if coal[j]]
+                        # sufficiency: start from shuffled, knock IN coalition players
                         expanded = shuf.clone()
-                        for j in ki_indices:
-                            s, e = positions[j]['start'], positions[j]['end']
-                            expanded[:, :, s:e] = wt[0, :, s:e]
+                        for j in range(n_motifs):
+                            if coal[j]:
+                                s, e = positions[j]['start'], positions[j]['end']
+                                expanded[:, :, s:e] = wt[0, :, s:e]
+                        if include_context_players:
+                            if coal[n_motifs]:
+                                expanded[:, :, bg_positions] = wt[0, :, bg_positions]
+                            if coal[n_motifs + 1]:
+                                expanded[:, :, prom_positions] = wt[0, :, prom_positions]
+                            if coal[n_motifs + 2]:
+                                expanded[:, :, barc_positions] = wt[0, :, barc_positions]
                     chimeras.append(expanded)
 
                 chimeras = torch.cat(chimeras, dim=0)
@@ -1456,12 +1546,12 @@ class EigenMap:
                             out[i] = coalition_values[key][_c]
                         return out
 
-                    empty_val = coalition_values[tuple([0] * n_motifs)][_ct]
+                    empty_val = coalition_values[tuple([0] * n_players)][_ct]
 
                     class PrecomputedGame(shapiq.Game):
                         def __init__(self_game, nv=empty_val):
                             super().__init__(
-                                n_players=n_motifs,
+                                n_players=n_players,
                                 normalization_value=nv,
                             )
 
@@ -1469,7 +1559,7 @@ class EigenMap:
                             return _value_fn(coalitions)
 
                     game = PrecomputedGame()
-                    exact = shapiq.ExactComputer(n_players=n_motifs, game=game)
+                    exact = shapiq.ExactComputer(n_players=n_players, game=game)
                     sii_result = exact(index="k-SII", order=order)
 
                     for interaction_key in sii_result.dict_values:
@@ -1479,13 +1569,13 @@ class EigenMap:
                         interactions[interaction_key][ct] = score
 
                 results[si][act] = {
-                    'motifs': motif_names,
+                    'motifs': player_names,
                     'interactions': interactions,
                     'coalition_values': coalition_values,
                     'n_motifs': n_motifs,
                 }
 
-            done = idxs.index(si) + 1
+            done = idx_i + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
                 print(f"  shapley ({mode}): {done}/{len(idxs)} sequences",
                       end='\r')
@@ -1540,7 +1630,7 @@ class EigenMap:
         results = [None] * len(self.constructs)
         models = self._load_models()
 
-        for si in idxs:
+        for idx_i, si in enumerate(idxs):
             # WT one-hot: (1, 4, L)
             wt = self.X[si:si+1].float()
 
@@ -1681,7 +1771,7 @@ class EigenMap:
                     'n_players': n_players,
                 }
 
-            done = idxs.index(si) + 1
+            done = idx_i + 1
             if done == 1 or done % 100 == 0 or done == len(idxs):
                 print(f"  shapley context ({mode}): {done}/{len(idxs)} sequences",
                       end='\r')
