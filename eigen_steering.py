@@ -1139,9 +1139,16 @@ class EigenMap:
                     })
                 extra_players.append({
                     'label': 'promoter',
-                    'positions': list(range(ENHANCER_LEN, TOTAL_LEN)),
+                    'positions': list(range(PROMOTER_START, BARCODE_START)),
                     'motif_entry': [{'tf': 'promoter',
-                                     'start': ENHANCER_LEN,
+                                     'start': PROMOTER_START,
+                                     'end': BARCODE_START}],
+                })
+                extra_players.append({
+                    'label': 'barcode',
+                    'positions': list(range(BARCODE_START, TOTAL_LEN)),
+                    'motif_entry': [{'tf': 'barcode',
+                                     'start': BARCODE_START,
                                      'end': TOTAL_LEN}],
                 })
 
@@ -1547,18 +1554,19 @@ class EigenMap:
                     motif_mask[pos['start']:pos['end']] = True
                 bg_positions = np.where(~motif_mask)[0]
 
-                # Promoter positions
-                prom_positions = np.arange(ENHANCER_LEN, TOTAL_LEN)
+                # Promoter and barcode positions
+                prom_positions = np.arange(PROMOTER_START, BARCODE_START)
+                barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
 
-                n_players = n_motifs + 2
+                n_players = n_motifs + 3
 
                 # Player names and types
                 motif_names = [
                     pos['tf_names'][0] if pos['tf_names'] else '?'
                     for pos in positions
                 ]
-                player_names = motif_names + ['background', 'promoter']
-                player_types = ['motif'] * n_motifs + ['background', 'promoter']
+                player_names = motif_names + ['background', 'promoter', 'barcode']
+                player_types = ['motif'] * n_motifs + ['background', 'promoter', 'barcode']
 
                 order = min(max_order, n_players)
 
@@ -1584,9 +1592,10 @@ class EigenMap:
                             expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
                         # promoter player
                         if not coal[n_motifs + 1]:
-                            for k in range(n_rep):
-                                expanded[k, :, ENHANCER_LEN:TOTAL_LEN] = \
-                                    shuf[k, :, ENHANCER_LEN:TOTAL_LEN]
+                            expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
+                        # barcode player
+                        if not coal[n_motifs + 2]:
+                            expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
                     else:
                         # sufficiency: start from shuffled, knock IN coalition players
                         expanded = shuf.clone()
@@ -1599,8 +1608,10 @@ class EigenMap:
                             expanded[:, :, bg_positions] = wt[0, :, bg_positions]
                         # promoter player
                         if coal[n_motifs + 1]:
-                            expanded[:, :, ENHANCER_LEN:TOTAL_LEN] = \
-                                wt[0, :, ENHANCER_LEN:TOTAL_LEN]
+                            expanded[:, :, prom_positions] = wt[0, :, prom_positions]
+                        # barcode player
+                        if coal[n_motifs + 2]:
+                            expanded[:, :, barc_positions] = wt[0, :, barc_positions]
                     chimeras.append(expanded)
 
                 chimeras = torch.cat(chimeras, dim=0)
