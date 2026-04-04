@@ -1022,7 +1022,8 @@ class EigenMap:
     # ----- necessity / sufficiency tests -----
 
     def necessity_test(self, seq_idx=None, n_rep=20, nec_order=1,
-                       batch_size=64, random_state=None):
+                       batch_size=64, random_state=None,
+                       include_context_players=True):
         """Necessity test — marginalized local knockout of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1122,6 +1123,8 @@ class EigenMap:
                     })
 
                 # --- background and promoter synthetic players ---
+                if not include_context_players:
+                    continue
                 covered = set()
                 for pos in positions:
                     for bp in range(pos['start'], min(pos['end'], ENHANCER_LEN)):
@@ -1188,7 +1191,8 @@ class EigenMap:
         return results
 
     def sufficiency_test(self, seq_idx=None, n_rep=20, suf_order=1,
-                         suff_pos=None, batch_size=64, random_state=None):
+                         suff_pos=None, batch_size=64, random_state=None,
+                         include_context_players=True):
         """Sufficiency test — marginalized global knock-in of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1320,7 +1324,8 @@ class EigenMap:
 
     def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
                                   batch_size=128, random_state=None,
-                                  mode='necessity'):
+                                  mode='necessity',
+                                  include_context_players=True):
         """Shapley Interaction Indices for motifs via necessity or sufficiency game.
 
         For each sequence, computes the k-SII up to max_order using the
@@ -1493,7 +1498,8 @@ class EigenMap:
     def shapley_interaction_index_context(self, seq_idx=None, max_order=2,
                                           n_rep=20, batch_size=128,
                                           random_state=None,
-                                          mode='necessity'):
+                                          mode='necessity',
+                                          include_context_players=True):
         """Shapley Interaction Indices with background and promoter as extra players.
 
         Same as shapley_interaction_index but the player set is expanded:
@@ -1558,15 +1564,19 @@ class EigenMap:
                 prom_positions = np.arange(PROMOTER_START, BARCODE_START)
                 barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
 
-                n_players = n_motifs + 3
-
                 # Player names and types
                 motif_names = [
                     pos['tf_names'][0] if pos['tf_names'] else '?'
                     for pos in positions
                 ]
-                player_names = motif_names + ['background', 'promoter', 'barcode']
-                player_types = ['motif'] * n_motifs + ['background', 'promoter', 'barcode']
+                if include_context_players:
+                    n_players = n_motifs + 3
+                    player_names = motif_names + ['background', 'promoter', 'barcode']
+                    player_types = ['motif'] * n_motifs + ['background', 'promoter', 'barcode']
+                else:
+                    n_players = n_motifs
+                    player_names = motif_names
+                    player_types = ['motif'] * n_motifs
 
                 order = min(max_order, n_players)
 
@@ -1587,15 +1597,16 @@ class EigenMap:
                             if not coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = shuf[:, :, s:e]
-                        # background player
-                        if not coal[n_motifs]:
-                            expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
-                        # promoter player
-                        if not coal[n_motifs + 1]:
-                            expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
-                        # barcode player
-                        if not coal[n_motifs + 2]:
-                            expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
+                        if include_context_players:
+                            # background player
+                            if not coal[n_motifs]:
+                                expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
+                            # promoter player
+                            if not coal[n_motifs + 1]:
+                                expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
+                            # barcode player
+                            if not coal[n_motifs + 2]:
+                                expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
                     else:
                         # sufficiency: start from shuffled, knock IN coalition players
                         expanded = shuf.clone()
@@ -1603,15 +1614,16 @@ class EigenMap:
                             if coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = wt[0, :, s:e]
-                        # background player
-                        if coal[n_motifs]:
-                            expanded[:, :, bg_positions] = wt[0, :, bg_positions]
-                        # promoter player
-                        if coal[n_motifs + 1]:
-                            expanded[:, :, prom_positions] = wt[0, :, prom_positions]
-                        # barcode player
-                        if coal[n_motifs + 2]:
-                            expanded[:, :, barc_positions] = wt[0, :, barc_positions]
+                        if include_context_players:
+                            # background player
+                            if coal[n_motifs]:
+                                expanded[:, :, bg_positions] = wt[0, :, bg_positions]
+                            # promoter player
+                            if coal[n_motifs + 1]:
+                                expanded[:, :, prom_positions] = wt[0, :, prom_positions]
+                            # barcode player
+                            if coal[n_motifs + 2]:
+                                expanded[:, :, barc_positions] = wt[0, :, barc_positions]
                     chimeras.append(expanded)
 
                 chimeras = torch.cat(chimeras, dim=0)
