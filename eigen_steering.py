@@ -2209,7 +2209,9 @@ class EigenMap:
         cts = [ct] if ct is not None else self.cell_types
         raw = []
         for c in cts:
-            for h in self.motif_hits[c][seq_idx]:
+            source = (self.motif_hits_ranked[c] if hasattr(self, 'motif_hits_ranked')
+                      and c in self.motif_hits_ranked else self.motif_hits[c])
+            for h in source[seq_idx]:
                 raw.append({
                     'start': h['start'], 'end': h['end'], 'ct': c,
                     'top_hits': h.get('top_hits',
