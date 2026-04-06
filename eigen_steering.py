@@ -2204,7 +2204,7 @@ class EigenMap:
         When ct is None, merge across all cell types (original behavior).
 
         Overlapping seqlet intervals are merged. TF superset is the union
-        of top hits, sorted by best p-value.
+        of top hits, sorted by best binding score (or p-value as fallback).
         """
         cts = [ct] if ct is not None else self.cell_types
         raw = []
@@ -2226,14 +2226,27 @@ class EigenMap:
                                'hits': [r]})
         results = []
         for m in merged:
-            tf_best_pval = {}
+            # Use binding_score (higher=better) if available, else p-value
+            use_binding = any(
+                'binding_score' in th
+                for r in m['hits'] for th in r['top_hits'][:3]
+            )
+            tf_best = {}
             for r in m['hits']:
                 for th in r['top_hits'][:3]:
                     tf = th['tf']
-                    pv = th['pval']
-                    if tf not in tf_best_pval or pv < tf_best_pval[tf]:
-                        tf_best_pval[tf] = pv
-            tf_names = sorted(tf_best_pval, key=tf_best_pval.get)
+                    if use_binding:
+                        score = th.get('binding_score', 0.0)
+                        if tf not in tf_best or score > tf_best[tf]:
+                            tf_best[tf] = score
+                    else:
+                        pv = th['pval']
+                        if tf not in tf_best or pv < tf_best[tf]:
+                            tf_best[tf] = pv
+            if use_binding:
+                tf_names = sorted(tf_best, key=tf_best.get, reverse=True)
+            else:
+                tf_names = sorted(tf_best, key=tf_best.get)
             results.append({
                 'start': m['start'], 'end': m['end'],
                 'mid': (m['start'] + m['end']) / 2,
