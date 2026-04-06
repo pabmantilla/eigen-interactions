@@ -27,7 +27,7 @@ em.compute_attributions(method='deeplift', n_shuffles=20)
 em.eigendecompose()
 em.annotate_motifs()
 em.plot_eigen_logos(seq_idx=0)
-em.necessity_test(seq_idx=0, n_shuffles=100)
+em.necessity_test(seq_idx=0, n_reps=100)
 em.shapley_interaction_index(seq_idx=0, pos_pairs=[(50, 100)])
 ```
 
