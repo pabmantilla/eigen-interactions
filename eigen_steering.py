@@ -1865,6 +1865,137 @@ class EigenMap:
                              'shapley_interaction_index_context', results)
         return results
 
+    def shapley_syntax_vs_background(self, seq_idx=None, n_rep=20,
+                                      batch_size=128, random_state=None,
+                                      cache_dir=None):
+        """2-player Shapley game: motif_syntax vs background.
+
+        Decomposes the WT prediction into contributions from:
+        - motif_syntax: WT motif sequences at their original positions
+          (captures identity + spacing + orientation)
+        - background: WT flanking context with motifs KO'd
+          (captures GC content, flanking sequence, etc.)
+
+        Four coalitions per (sequence, annotation_ct), each averaged
+        over n_rep dinucleotide-shuffled replicates:
+          v({})         = fully shuffled
+          v({bg})       = WT with motif positions shuffled
+          v({syntax})   = shuffled with WT motifs knocked in
+          v({both})     = full WT
+
+        Returns
+        -------
+        list of length len(self.constructs), with None for sequences
+        not in seq_idx. Each entry is a dict keyed by annotation cell type.
+        """
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+
+        if cache_dir is not None:
+            cache_hash = self._cache_key(
+                'shapley_syntax_vs_background', seq_idx=seq_idx,
+                n_rep=n_rep, random_state=random_state)
+            cached = self._load_cache(cache_dir, cache_hash,
+                                       'shapley_syntax_vs_background')
+            if cached is not None:
+                return cached
+
+        idxs = self._resolve_seq_idxs(seq_idx)
+        results = [None] * len(self.constructs)
+        models = self._load_models()
+
+        for idx_i, si in enumerate(idxs):
+            results[si] = {}
+            wt = self.X[si:si+1].float()  # (1, 4, L)
+
+            # shuffled backgrounds: (n_rep, 4, L)
+            shuf = dinucleotide_shuffle(wt, n=n_rep,
+                                        random_state=random_state)[0]
+
+            for act in self.cell_types:
+                positions = self._collect_motif_positions(si, ct=act)
+                n_motifs = len(positions)
+                motif_names = []
+                for p in positions:
+                    motif_names.append(p['tf_names'][0]
+                                       if p['tf_names'] else '?')
+
+                # build 4 coalition tensors, each (n_rep, 4, L)
+                # 1. empty = shuf
+                c_empty = shuf
+
+                # 2. background only = WT with motif positions shuffled
+                c_bg = wt.expand(n_rep, -1, -1).clone()
+                for p in positions:
+                    s, e = p['start'], p['end']
+                    c_bg[:, :, s:e] = shuf[:, :, s:e]
+
+                # 3. syntax only = shuf with WT motifs knocked in
+                c_syntax = shuf.clone()
+                for p in positions:
+                    s, e = p['start'], p['end']
+                    c_syntax[:, :, s:e] = wt[:, :, s:e]
+
+                # 4. both = WT
+                c_both = wt.expand(n_rep, -1, -1)
+
+                # cat all and predict in one call
+                all_seqs = torch.cat([c_empty, c_bg, c_syntax, c_both],
+                                     dim=0)  # (4*n_rep, 4, L)
+                all_preds = self._predict_tensor(all_seqs, models=models,
+                                                  batch_size=batch_size)
+
+                # extract mean per coalition per scoring cell type
+                coalition_values = {'empty': {}, 'background': {},
+                                    'syntax': {}, 'both': {}}
+                for ct in self.cell_types:
+                    vals = all_preds[ct]
+                    coalition_values['empty'][ct] = float(
+                        vals[0:n_rep].mean())
+                    coalition_values['background'][ct] = float(
+                        vals[n_rep:2*n_rep].mean())
+                    coalition_values['syntax'][ct] = float(
+                        vals[2*n_rep:3*n_rep].mean())
+                    coalition_values['both'][ct] = float(
+                        vals[3*n_rep:4*n_rep].mean())
+
+                # Shapley values (closed form, 2 players)
+                shap_syntax = {}
+                shap_background = {}
+                ratio = {}
+                for ct in self.cell_types:
+                    v_e = coalition_values['empty'][ct]
+                    v_b = coalition_values['background'][ct]
+                    v_s = coalition_values['syntax'][ct]
+                    v_both = coalition_values['both'][ct]
+                    shap_syntax[ct] = ((v_s - v_e) + (v_both - v_b)) / 2
+                    shap_background[ct] = ((v_b - v_e) + (v_both - v_s)) / 2
+                    if abs(shap_syntax[ct]) > 1e-8:
+                        ratio[ct] = shap_background[ct] / shap_syntax[ct]
+                    else:
+                        ratio[ct] = float('nan')
+
+                results[si][act] = {
+                    'n_motifs': n_motifs,
+                    'motif_names': motif_names,
+                    'coalition_values': coalition_values,
+                    'shap_syntax': shap_syntax,
+                    'shap_background': shap_background,
+                    'ratio_bg_over_syntax': ratio,
+                }
+
+            done = idx_i + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  syntax_vs_bg: {done}/{len(idxs)} sequences",
+                      end='\r')
+        print()
+
+        del models
+        torch.cuda.empty_cache()
+        if cache_dir is not None:
+            self._save_cache(cache_dir, cache_hash,
+                             'shapley_syntax_vs_background', results)
+        return results
+
     def _resolve_seq_idxs(self, seq_idx):
         """Normalise seq_idx arg to a list of ints."""
         if seq_idx is None:
