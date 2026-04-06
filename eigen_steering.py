@@ -1048,7 +1048,8 @@ class EigenMap:
     def necessity_test(self, seq_idx=None, n_rep=20, nec_order=1,
                        batch_size=64, random_state=None,
                        include_context_players=True,
-                       construct_players=False):
+                       construct_players=False,
+                       cache_dir=None):
         """Necessity test — marginalized local knockout of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1081,6 +1082,16 @@ class EigenMap:
             'scores' : {ct: float} — mean Δpred from WT for each cell type
         """
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        if cache_dir is not None:
+            cache_hash = self._cache_key(
+                'necessity_test', seq_idx=seq_idx, n_rep=n_rep,
+                nec_order=nec_order, random_state=random_state,
+                include_context_players=include_context_players,
+                construct_players=construct_players)
+            cached = self._load_cache(cache_dir, cache_hash, 'necessity_test')
+            if cached is not None:
+                return cached
+
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [[] for _ in range(len(self.constructs))]
         models = self._load_models()
@@ -1214,12 +1225,15 @@ class EigenMap:
 
         del models
         torch.cuda.empty_cache()
+        if cache_dir is not None:
+            self._save_cache(cache_dir, cache_hash, 'necessity_test', results)
         return results
 
     def sufficiency_test(self, seq_idx=None, n_rep=20, suf_order=1,
                          suff_pos=None, batch_size=64, random_state=None,
                          include_context_players=True,
-                         construct_players=False):
+                         construct_players=False,
+                         cache_dir=None):
         """Sufficiency test — marginalized global knock-in of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1253,6 +1267,17 @@ class EigenMap:
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
         if suff_pos is None:
             suff_pos = ENHANCER_LEN // 2
+        if cache_dir is not None:
+            cache_hash = self._cache_key(
+                'sufficiency_test', seq_idx=seq_idx, n_rep=n_rep,
+                suf_order=suf_order, suff_pos=suff_pos,
+                random_state=random_state,
+                include_context_players=include_context_players,
+                construct_players=construct_players)
+            cached = self._load_cache(cache_dir, cache_hash, 'sufficiency_test')
+            if cached is not None:
+                return cached
+
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [[] for _ in range(len(self.constructs))]
         models = self._load_models()
@@ -1406,6 +1431,8 @@ class EigenMap:
 
         del models
         torch.cuda.empty_cache()
+        if cache_dir is not None:
+            self._save_cache(cache_dir, cache_hash, 'sufficiency_test', results)
         return results
 
     def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
@@ -1626,7 +1653,8 @@ class EigenMap:
                                           random_state=None,
                                           mode='necessity',
                                           include_context_players=True,
-                                          construct_players=False):
+                                          construct_players=False,
+                                          cache_dir=None):
         """Shapley Interaction Indices with background and promoter as extra players.
 
         Same as shapley_interaction_index but the player set is expanded:
@@ -1663,6 +1691,17 @@ class EigenMap:
         import shapiq
 
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        if cache_dir is not None:
+            cache_hash = self._cache_key(
+                'shapley_interaction_index_context', seq_idx=seq_idx,
+                max_order=max_order, n_rep=n_rep, random_state=random_state,
+                mode=mode, include_context_players=include_context_players,
+                construct_players=construct_players)
+            cached = self._load_cache(cache_dir, cache_hash,
+                                      'shapley_interaction_index_context')
+            if cached is not None:
+                return cached
+
         idxs = self._resolve_seq_idxs(seq_idx)
         results = [None] * len(self.constructs)
         models = self._load_models()
@@ -1821,6 +1860,9 @@ class EigenMap:
 
         del models
         torch.cuda.empty_cache()
+        if cache_dir is not None:
+            self._save_cache(cache_dir, cache_hash,
+                             'shapley_interaction_index_context', results)
         return results
 
     def _resolve_seq_idxs(self, seq_idx):
