@@ -1027,7 +1027,8 @@ class EigenMap:
 
     def necessity_test(self, seq_idx=None, n_rep=20, nec_order=1,
                        batch_size=64, random_state=None,
-                       include_context_players=True):
+                       include_context_players=True,
+                       construct_players=False):
         """Necessity test — marginalized local knockout of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1126,8 +1127,8 @@ class EigenMap:
                         'scores': scores,
                     })
 
-                # --- background and promoter synthetic players ---
-                if not include_context_players:
+                # --- context (bg) and construct (promoter/barcode) players ---
+                if not include_context_players and not construct_players:
                     continue
                 covered = set()
                 for pos in positions:
@@ -1136,7 +1137,7 @@ class EigenMap:
                 bg_positions = sorted(set(range(ENHANCER_LEN)) - covered)
 
                 extra_players = []
-                if bg_positions:
+                if include_context_players and bg_positions:
                     extra_players.append({
                         'label': 'background',
                         'positions': bg_positions,
@@ -1144,20 +1145,21 @@ class EigenMap:
                                          'start': bg_positions[0],
                                          'end': bg_positions[-1] + 1}],
                     })
-                extra_players.append({
-                    'label': 'promoter',
-                    'positions': list(range(PROMOTER_START, BARCODE_START)),
-                    'motif_entry': [{'tf': 'promoter',
-                                     'start': PROMOTER_START,
-                                     'end': BARCODE_START}],
-                })
-                extra_players.append({
-                    'label': 'barcode',
-                    'positions': list(range(BARCODE_START, TOTAL_LEN)),
-                    'motif_entry': [{'tf': 'barcode',
-                                     'start': BARCODE_START,
-                                     'end': TOTAL_LEN}],
-                })
+                if construct_players:
+                    extra_players.append({
+                        'label': 'promoter',
+                        'positions': list(range(PROMOTER_START, BARCODE_START)),
+                        'motif_entry': [{'tf': 'promoter',
+                                         'start': PROMOTER_START,
+                                         'end': BARCODE_START}],
+                    })
+                    extra_players.append({
+                        'label': 'barcode',
+                        'positions': list(range(BARCODE_START, TOTAL_LEN)),
+                        'motif_entry': [{'tf': 'barcode',
+                                         'start': BARCODE_START,
+                                         'end': TOTAL_LEN}],
+                    })
 
                 extra_chimeras = []
                 extra_info = []
@@ -1196,7 +1198,8 @@ class EigenMap:
 
     def sufficiency_test(self, seq_idx=None, n_rep=20, suf_order=1,
                          suff_pos=None, batch_size=64, random_state=None,
-                         include_context_players=True):
+                         include_context_players=True,
+                         construct_players=False):
         """Sufficiency test — marginalized global knock-in of motif regions.
 
         For each sequence, generates dinucleotide-shuffled backgrounds and
@@ -1317,8 +1320,8 @@ class EigenMap:
                         'scores': scores,
                     })
 
-                # --- background, promoter, barcode synthetic players (KI) ---
-                if not include_context_players:
+                # --- context (bg) and construct (promoter/barcode) players (KI) ---
+                if not include_context_players and not construct_players:
                     continue
                 covered = set()
                 for pos in positions:
@@ -1327,7 +1330,7 @@ class EigenMap:
                 bg_positions = sorted(set(range(ENHANCER_LEN)) - covered)
 
                 extra_players = []
-                if bg_positions:
+                if include_context_players and bg_positions:
                     extra_players.append({
                         'label': 'background',
                         'positions': bg_positions,
@@ -1335,20 +1338,21 @@ class EigenMap:
                                          'start': bg_positions[0],
                                          'end': bg_positions[-1] + 1}],
                     })
-                extra_players.append({
-                    'label': 'promoter',
-                    'positions': list(range(PROMOTER_START, BARCODE_START)),
-                    'motif_entry': [{'tf': 'promoter',
-                                     'start': PROMOTER_START,
-                                     'end': BARCODE_START}],
-                })
-                extra_players.append({
-                    'label': 'barcode',
-                    'positions': list(range(BARCODE_START, TOTAL_LEN)),
-                    'motif_entry': [{'tf': 'barcode',
-                                     'start': BARCODE_START,
-                                     'end': TOTAL_LEN}],
-                })
+                if construct_players:
+                    extra_players.append({
+                        'label': 'promoter',
+                        'positions': list(range(PROMOTER_START, BARCODE_START)),
+                        'motif_entry': [{'tf': 'promoter',
+                                         'start': PROMOTER_START,
+                                         'end': BARCODE_START}],
+                    })
+                    extra_players.append({
+                        'label': 'barcode',
+                        'positions': list(range(BARCODE_START, TOTAL_LEN)),
+                        'motif_entry': [{'tf': 'barcode',
+                                         'start': BARCODE_START,
+                                         'end': TOTAL_LEN}],
+                    })
 
                 extra_knockins = []
                 extra_info = []
@@ -1387,7 +1391,8 @@ class EigenMap:
     def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
                                   batch_size=128, random_state=None,
                                   mode='necessity',
-                                  include_context_players=True):
+                                  include_context_players=True,
+                                  construct_players=False):
         """Shapley Interaction Indices for motifs via necessity or sufficiency game.
 
         For each sequence, computes the k-SII up to max_order using the
@@ -1464,20 +1469,25 @@ class EigenMap:
                     for pos in positions
                 ]
 
-                # optionally add context players
+                # optionally add context (bg) and construct (promoter/barcode) players
+                extra_count = 0
+                extra_names = []
+                bg_positions = prom_positions = barc_positions = None
                 if include_context_players:
                     motif_mask = np.zeros(ENHANCER_LEN, dtype=bool)
                     for pos in positions:
                         motif_mask[pos['start']:pos['end']] = True
                     bg_positions = np.where(~motif_mask)[0]
+                    extra_names.append('background')
+                    extra_count += 1
+                if construct_players:
                     prom_positions = np.arange(PROMOTER_START, BARCODE_START)
                     barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
+                    extra_names += ['promoter', 'barcode']
+                    extra_count += 2
 
-                    n_players = n_motifs + 3
-                    player_names = motif_names + ['background', 'promoter', 'barcode']
-                else:
-                    n_players = n_motifs
-                    player_names = motif_names
+                n_players = n_motifs + extra_count
+                player_names = motif_names + extra_names
 
                 order = min(max_order, n_players)
 
@@ -1498,12 +1508,15 @@ class EigenMap:
                             if not coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = shuf[:, :, s:e]
+                        ei = n_motifs
                         if include_context_players:
-                            if not coal[n_motifs]:
+                            if not coal[ei]:
                                 expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
-                            if not coal[n_motifs + 1]:
+                            ei += 1
+                        if construct_players:
+                            if not coal[ei]:
                                 expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
-                            if not coal[n_motifs + 2]:
+                            if not coal[ei + 1]:
                                 expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
                     else:
                         # sufficiency: start from shuffled, knock IN coalition players
@@ -1512,12 +1525,15 @@ class EigenMap:
                             if coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = wt[0, :, s:e]
+                        ei = n_motifs
                         if include_context_players:
-                            if coal[n_motifs]:
+                            if coal[ei]:
                                 expanded[:, :, bg_positions] = wt[0, :, bg_positions]
-                            if coal[n_motifs + 1]:
+                            ei += 1
+                        if construct_players:
+                            if coal[ei]:
                                 expanded[:, :, prom_positions] = wt[0, :, prom_positions]
-                            if coal[n_motifs + 2]:
+                            if coal[ei + 1]:
                                 expanded[:, :, barc_positions] = wt[0, :, barc_positions]
                     chimeras.append(expanded)
 
@@ -1589,7 +1605,8 @@ class EigenMap:
                                           n_rep=20, batch_size=128,
                                           random_state=None,
                                           mode='necessity',
-                                          include_context_players=True):
+                                          include_context_players=True,
+                                          construct_players=False):
         """Shapley Interaction Indices with background and promoter as extra players.
 
         Same as shapley_interaction_index but the player set is expanded:
@@ -1644,29 +1661,34 @@ class EigenMap:
                 positions = self._collect_motif_positions(si, ct=act)
                 n_motifs = len(positions)
 
-                # Build background mask: enhancer positions not in any motif
-                motif_mask = np.zeros(ENHANCER_LEN, dtype=bool)
-                for pos in positions:
-                    motif_mask[pos['start']:pos['end']] = True
-                bg_positions = np.where(~motif_mask)[0]
-
-                # Promoter and barcode positions
-                prom_positions = np.arange(PROMOTER_START, BARCODE_START)
-                barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
-
-                # Player names and types
+                # Build player lists based on context / construct flags
                 motif_names = [
                     pos['tf_names'][0] if pos['tf_names'] else '?'
                     for pos in positions
                 ]
+                extra_count = 0
+                extra_names = []
+                extra_types = []
+                bg_positions = prom_positions = barc_positions = None
+
                 if include_context_players:
-                    n_players = n_motifs + 3
-                    player_names = motif_names + ['background', 'promoter', 'barcode']
-                    player_types = ['motif'] * n_motifs + ['background', 'promoter', 'barcode']
-                else:
-                    n_players = n_motifs
-                    player_names = motif_names
-                    player_types = ['motif'] * n_motifs
+                    motif_mask = np.zeros(ENHANCER_LEN, dtype=bool)
+                    for pos in positions:
+                        motif_mask[pos['start']:pos['end']] = True
+                    bg_positions = np.where(~motif_mask)[0]
+                    extra_names.append('background')
+                    extra_types.append('background')
+                    extra_count += 1
+                if construct_players:
+                    prom_positions = np.arange(PROMOTER_START, BARCODE_START)
+                    barc_positions = np.arange(BARCODE_START, TOTAL_LEN)
+                    extra_names += ['promoter', 'barcode']
+                    extra_types += ['promoter', 'barcode']
+                    extra_count += 2
+
+                n_players = n_motifs + extra_count
+                player_names = motif_names + extra_names
+                player_types = ['motif'] * n_motifs + extra_types
 
                 order = min(max_order, n_players)
 
@@ -1687,15 +1709,15 @@ class EigenMap:
                             if not coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = shuf[:, :, s:e]
+                        ei = n_motifs
                         if include_context_players:
-                            # background player
-                            if not coal[n_motifs]:
+                            if not coal[ei]:
                                 expanded[:, :, bg_positions] = shuf[:, :, bg_positions]
-                            # promoter player
-                            if not coal[n_motifs + 1]:
+                            ei += 1
+                        if construct_players:
+                            if not coal[ei]:
                                 expanded[:, :, prom_positions] = shuf[:, :, prom_positions]
-                            # barcode player
-                            if not coal[n_motifs + 2]:
+                            if not coal[ei + 1]:
                                 expanded[:, :, barc_positions] = shuf[:, :, barc_positions]
                     else:
                         # sufficiency: start from shuffled, knock IN coalition players
@@ -1704,15 +1726,15 @@ class EigenMap:
                             if coal[j]:
                                 s, e = positions[j]['start'], positions[j]['end']
                                 expanded[:, :, s:e] = wt[0, :, s:e]
+                        ei = n_motifs
                         if include_context_players:
-                            # background player
-                            if coal[n_motifs]:
+                            if coal[ei]:
                                 expanded[:, :, bg_positions] = wt[0, :, bg_positions]
-                            # promoter player
-                            if coal[n_motifs + 1]:
+                            ei += 1
+                        if construct_players:
+                            if coal[ei]:
                                 expanded[:, :, prom_positions] = wt[0, :, prom_positions]
-                            # barcode player
-                            if coal[n_motifs + 2]:
+                            if coal[ei + 1]:
                                 expanded[:, :, barc_positions] = wt[0, :, barc_positions]
                     chimeras.append(expanded)
 
