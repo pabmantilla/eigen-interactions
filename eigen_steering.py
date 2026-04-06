@@ -1996,6 +1996,395 @@ class EigenMap:
                              'shapley_syntax_vs_background', results)
         return results
 
+    # ------------------------------------------------------------------
+    # Motif context swap
+    # ------------------------------------------------------------------
+    def motif_context_swap(self, seq_idx=None, n_rep=20, batch_size=128,
+                           random_state=None, swap='cell_lines',
+                           groups=None, experimental_gt=False,
+                           n_pairs=100, plot=True, cache_dir=None):
+        """Swap motif syntax from one group into backgrounds from another.
+
+        Modes
+        -----
+        cell_lines : within-sequence, cross-annotation cell type swaps.
+        activity   : cross-sequence swaps binned by predicted activity.
+        mechanism  : cross-sequence swaps binned by EI_1 var*r score.
+
+        Returns dict with swap_matrix, groups, and optional fig.
+        """
+        assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
+        assert swap in ('cell_lines', 'activity', 'mechanism')
+
+        if cache_dir is not None:
+            cache_hash = self._cache_key(
+                'motif_context_swap', seq_idx=seq_idx, n_rep=n_rep,
+                random_state=random_state, swap=swap, n_pairs=n_pairs,
+                experimental_gt=experimental_gt)
+            cached = self._load_cache(cache_dir, cache_hash,
+                                       'motif_context_swap')
+            if cached is not None:
+                return cached
+
+        idxs = self._resolve_seq_idxs(seq_idx)
+        models = self._load_models()
+
+        if swap == 'cell_lines':
+            result = self._context_swap_cell_lines(
+                idxs, models, n_rep, batch_size, random_state,
+                experimental_gt)
+        else:
+            if groups is None:
+                groups = self._auto_groups(swap, idxs)
+            result = self._context_swap_cross_seq(
+                idxs, models, n_rep, batch_size, random_state,
+                experimental_gt, groups, n_pairs)
+
+        del models
+        torch.cuda.empty_cache()
+
+        if plot:
+            result['fig'] = self._plot_context_swap(result)
+        else:
+            result['fig'] = None
+
+        if cache_dir is not None:
+            self._save_cache(cache_dir, cache_hash,
+                             'motif_context_swap', result)
+        return result
+
+    def _auto_groups(self, swap, idxs):
+        """Auto-compute groups for activity or mechanism swap modes."""
+        if swap == 'activity':
+            ct0 = self.cell_types[0]
+            preds = self.predictions[ct0]
+            order = np.argsort(preds)
+            top_100 = order[-100:].tolist()
+            bottom_100 = order[:100].tolist()
+            mid_start = len(order) // 2 - 50
+            neutral_100 = order[mid_start:mid_start + 100].tolist()
+            return {'top': top_100, 'neutral': neutral_100,
+                    'bottom': bottom_100}
+        else:  # mechanism
+            mechanism_scores = []
+            for si in range(len(self.constructs)):
+                r = self.eigen_results[si]
+                ei1_var = r['var_ratio'][0]
+                E = r['E_scaled']
+                corr = np.corrcoef(E[:, 0], E[:, 1])[0, 1]
+                mechanism_scores.append(
+                    ei1_var * (corr if np.isfinite(corr) else 0.0))
+            mechanism_scores = np.array(mechanism_scores)
+            sorted_idx = np.argsort(mechanism_scores)
+            n = len(sorted_idx)
+            third = n // 3
+            return {
+                'diff-diff': sorted_idx[:third].tolist(),
+                'same-diff': sorted_idx[third:2 * third].tolist(),
+                'same-same': sorted_idx[2 * third:].tolist(),
+            }
+
+    def _context_swap_cell_lines(self, idxs, models, n_rep, batch_size,
+                                  random_state, experimental_gt):
+        """Within-sequence swaps across annotation cell types."""
+        group_names = list(self.cell_types)
+        # swap_matrix[(syntax_ct, bg_ct)][scoring_ct] = list of values
+        swap_acc = {}
+        for sct in group_names:
+            for bct in group_names:
+                swap_acc[(sct, bct)] = {ct: [] for ct in self.cell_types}
+
+        suf_acc = {g: {ct: [] for ct in self.cell_types}
+                   for g in group_names} if experimental_gt else None
+
+        for idx_i, si in enumerate(idxs):
+            wt = self.X[si:si + 1].float()  # (1, 4, L)
+            shuf = dinucleotide_shuffle(
+                wt, n=n_rep, random_state=random_state)[0]
+
+            # collect motif positions per annotation ct
+            pos_by_ct = {ct: self._collect_motif_positions(si, ct=ct)
+                         for ct in self.cell_types}
+
+            # build all chimeras for this sequence
+            chimera_list = []
+            combo_keys = []
+            for sct in group_names:
+                for bct in group_names:
+                    src_pos = pos_by_ct[sct]
+                    tgt_pos = pos_by_ct[bct]
+                    # chimera: target bg with source motifs KI'd
+                    chimera = wt.expand(n_rep, -1, -1).clone()
+                    # KO target motifs
+                    for p in tgt_pos:
+                        chimera[:, :, p['start']:p['end']] = \
+                            shuf[:, :, p['start']:p['end']]
+                    # KI source motifs
+                    for p in src_pos:
+                        chimera[:, :, p['start']:p['end']] = \
+                            wt[0, :, p['start']:p['end']]
+                    chimera_list.append(chimera)
+                    combo_keys.append((sct, bct))
+
+            # sufficiency: motifs KI into pure shuffled bg
+            if experimental_gt:
+                for sct in group_names:
+                    src_pos = pos_by_ct[sct]
+                    suf_chimera = shuf.clone()
+                    for p in src_pos:
+                        suf_chimera[:, :, p['start']:p['end']] = \
+                            wt[0, :, p['start']:p['end']]
+                    chimera_list.append(suf_chimera)
+                    combo_keys.append(('__suf__', sct))
+
+            all_seqs = torch.cat(chimera_list, dim=0)
+            all_preds = self._predict_tensor(all_seqs, models=models,
+                                              batch_size=batch_size)
+
+            offset = 0
+            for key in combo_keys:
+                for ct in self.cell_types:
+                    val = float(all_preds[ct][offset:offset + n_rep].mean())
+                    if key[0] == '__suf__':
+                        suf_acc[key[1]][ct].append(val)
+                    else:
+                        swap_acc[key][ct].append(val)
+                offset += n_rep
+
+            done = idx_i + 1
+            if done == 1 or done % 100 == 0 or done == len(idxs):
+                print(f"  context_swap (cell_lines): {done}/{len(idxs)}",
+                      end='\r')
+        print()
+
+        # average across sequences
+        swap_matrix = {}
+        swap_sem = {}
+        for key in swap_acc:
+            swap_matrix[key] = {}
+            swap_sem[key] = {}
+            for ct in self.cell_types:
+                arr = np.array(swap_acc[key][ct])
+                swap_matrix[key][ct] = float(arr.mean())
+                swap_sem[key][ct] = float(arr.std() / np.sqrt(len(arr)))
+
+        result = {
+            'swap_mode': 'cell_lines',
+            'groups': group_names,
+            'swap_matrix': swap_matrix,
+            'swap_sem': swap_sem,
+        }
+        if experimental_gt:
+            suf = {}
+            suf_sem_d = {}
+            for g in group_names:
+                suf[g] = {}
+                suf_sem_d[g] = {}
+                for ct in self.cell_types:
+                    arr = np.array(suf_acc[g][ct])
+                    suf[g][ct] = float(arr.mean())
+                    suf_sem_d[g][ct] = float(arr.std() / np.sqrt(len(arr)))
+            result['sufficiency'] = suf
+            result['sufficiency_sem'] = suf_sem_d
+        return result
+
+    def _context_swap_cross_seq(self, idxs, models, n_rep, batch_size,
+                                 random_state, experimental_gt, groups,
+                                 n_pairs):
+        """Cross-sequence swaps (activity / mechanism modes)."""
+        rng = np.random.RandomState(random_state)
+        group_names = list(groups.keys())
+
+        # swap_matrix[(src_grp, tgt_grp)][scoring_ct] = list of pair means
+        swap_acc = {}
+        for sg in group_names:
+            for tg in group_names:
+                swap_acc[(sg, tg)] = {ct: [] for ct in self.cell_types}
+
+        suf_acc = {g: {ct: [] for ct in self.cell_types}
+                   for g in group_names} if experimental_gt else None
+
+        # precompute shuffles for all sequences we might need
+        all_seq_idxs = set()
+        for g in group_names:
+            all_seq_idxs.update(groups[g])
+        all_seq_idxs = sorted(all_seq_idxs)
+
+        total_pairs = 0
+        for sg in group_names:
+            for tg in group_names:
+                # generate pairs
+                src_pool = groups[sg]
+                tgt_pool = groups[tg]
+                if n_pairs is not None:
+                    pairs = [(rng.choice(src_pool), rng.choice(tgt_pool))
+                             for _ in range(n_pairs)]
+                else:
+                    pairs = list(itertools.product(src_pool, tgt_pool))
+
+                chimera_list = []
+                for src_si, tgt_si in pairs:
+                    wt_src = self.X[src_si:src_si + 1].float()
+                    wt_tgt = self.X[tgt_si:tgt_si + 1].float()
+                    shuf_tgt = dinucleotide_shuffle(
+                        wt_tgt, n=n_rep, random_state=random_state)[0]
+
+                    src_pos = self._collect_motif_positions(src_si, ct=None)
+                    tgt_pos = self._collect_motif_positions(tgt_si, ct=None)
+
+                    # build chimera
+                    chimera = wt_tgt.expand(n_rep, -1, -1).clone()
+                    for p in tgt_pos:
+                        chimera[:, :, p['start']:p['end']] = \
+                            shuf_tgt[:, :, p['start']:p['end']]
+                    for p in src_pos:
+                        chimera[:, :, p['start']:p['end']] = \
+                            wt_src[0, :, p['start']:p['end']]
+                    chimera_list.append(chimera)
+
+                # predict all pairs for this (sg, tg)
+                if chimera_list:
+                    all_seqs = torch.cat(chimera_list, dim=0)
+                    all_preds = self._predict_tensor(
+                        all_seqs, models=models, batch_size=batch_size)
+                    for pi in range(len(pairs)):
+                        for ct in self.cell_types:
+                            val = float(
+                                all_preds[ct][pi * n_rep:(pi + 1) * n_rep]
+                                .mean())
+                            swap_acc[(sg, tg)][ct].append(val)
+
+                total_pairs += len(pairs)
+                print(f"  context_swap: {total_pairs} pairs done", end='\r')
+
+        # sufficiency per group
+        if experimental_gt:
+            for g in group_names:
+                pool = groups[g]
+                sample = (rng.choice(pool, min(n_pairs or len(pool),
+                                               len(pool)), replace=False)
+                          if n_pairs else pool)
+                chimera_list = []
+                for si in sample:
+                    wt = self.X[si:si + 1].float()
+                    shuf = dinucleotide_shuffle(
+                        wt, n=n_rep, random_state=random_state)[0]
+                    src_pos = self._collect_motif_positions(si, ct=None)
+                    suf_chimera = shuf.clone()
+                    for p in src_pos:
+                        suf_chimera[:, :, p['start']:p['end']] = \
+                            wt[0, :, p['start']:p['end']]
+                    chimera_list.append(suf_chimera)
+                if chimera_list:
+                    all_seqs = torch.cat(chimera_list, dim=0)
+                    all_preds = self._predict_tensor(
+                        all_seqs, models=models, batch_size=batch_size)
+                    for pi in range(len(sample)):
+                        for ct in self.cell_types:
+                            val = float(
+                                all_preds[ct][pi * n_rep:(pi + 1) * n_rep]
+                                .mean())
+                            suf_acc[g][ct].append(val)
+        print()
+
+        # average across pairs
+        swap_matrix = {}
+        swap_sem = {}
+        for key in swap_acc:
+            swap_matrix[key] = {}
+            swap_sem[key] = {}
+            for ct in self.cell_types:
+                arr = np.array(swap_acc[key][ct])
+                if len(arr) > 0:
+                    swap_matrix[key][ct] = float(arr.mean())
+                    swap_sem[key][ct] = float(
+                        arr.std() / np.sqrt(len(arr)))
+                else:
+                    swap_matrix[key][ct] = float('nan')
+                    swap_sem[key][ct] = float('nan')
+
+        result = {
+            'swap_mode': 'cross_seq',
+            'groups': group_names,
+            'swap_matrix': swap_matrix,
+            'swap_sem': swap_sem,
+        }
+        if experimental_gt:
+            suf = {}
+            suf_sem_d = {}
+            for g in group_names:
+                suf[g] = {}
+                suf_sem_d[g] = {}
+                for ct in self.cell_types:
+                    arr = np.array(suf_acc[g][ct])
+                    if len(arr) > 0:
+                        suf[g][ct] = float(arr.mean())
+                        suf_sem_d[g][ct] = float(
+                            arr.std() / np.sqrt(len(arr)))
+                    else:
+                        suf[g][ct] = float('nan')
+                        suf_sem_d[g][ct] = float('nan')
+            result['sufficiency'] = suf
+            result['sufficiency_sem'] = suf_sem_d
+        return result
+
+    def _plot_context_swap(self, result):
+        """Barplot for motif context swap results."""
+        group_names = result['groups']
+        swap_matrix = result['swap_matrix']
+        swap_sem = result['swap_sem']
+        scoring_cts = list(self.cell_types)
+        has_suf = 'sufficiency' in result
+
+        # columns = background groups
+        bg_groups = group_names
+        n_bg = len(bg_groups)
+        fig, axes = plt.subplots(1, n_bg, figsize=(5 * n_bg, 5),
+                                 sharey=True, squeeze=False)
+        axes = axes[0]
+
+        colors = plt.cm.tab10(np.linspace(0, 1, len(group_names)))
+        bar_width = 0.8 / (len(group_names) + (1 if has_suf else 0))
+
+        for bg_i, bg_grp in enumerate(bg_groups):
+            ax = axes[bg_i]
+            x_base = np.arange(len(scoring_cts))
+
+            for sg_i, sg in enumerate(group_names):
+                key = (sg, bg_grp)
+                vals = [swap_matrix[key].get(ct, float('nan'))
+                        for ct in scoring_cts]
+                errs = [swap_sem[key].get(ct, 0) for ct in scoring_cts]
+                x_pos = x_base + sg_i * bar_width
+                ax.bar(x_pos, vals, bar_width, yerr=errs, capsize=3,
+                       label=f'{sg} syntax', color=colors[sg_i], alpha=0.85)
+
+            if has_suf:
+                for sg_i, sg in enumerate(group_names):
+                    vals = [result['sufficiency'][sg].get(ct, float('nan'))
+                            for ct in scoring_cts]
+                    errs = [result['sufficiency_sem'][sg].get(ct, 0)
+                            for ct in scoring_cts]
+                    x_pos = x_base + sg_i * bar_width
+                    ax.bar(x_pos, vals, bar_width, yerr=errs, capsize=3,
+                           color=colors[sg_i], alpha=0.4, hatch='//',
+                           label=f'{sg} suf' if bg_i == 0 else None)
+
+            center = x_base + bar_width * (len(group_names) - 1) / 2
+            ax.set_xticks(center)
+            ax.set_xticklabels(scoring_cts)
+            ax.set_title(f'{bg_grp} background')
+            ax.set_xlabel('Scoring cell type')
+            if bg_i == 0:
+                ax.set_ylabel('Mean prediction')
+
+        axes[0].legend(bbox_to_anchor=(0, -0.2), loc='upper left',
+                       ncol=len(group_names), fontsize=8)
+        fig.suptitle(f'Motif context swap ({result["swap_mode"]})',
+                     fontsize=13)
+        fig.tight_layout()
+        return fig
+
     def _resolve_seq_idxs(self, seq_idx):
         """Normalise seq_idx arg to a list of ints."""
         if seq_idx is None:
