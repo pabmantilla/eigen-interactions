@@ -378,6 +378,7 @@ class EigenMap:
         self.predictions: dict[str, np.ndarray] = {}  # ct -> (N,) predicted values
         self.actual: dict[str, Optional[np.ndarray]] = {}  # ct -> (N,) if provided
         self.eigen_results: list[dict] = []
+        self._prediction_cache: dict[str, dict[str, np.ndarray]] = {}
         print(f"EigenMap: {self.cell_types}, models={self.model_names}")
 
     # ----- sequence loading -----
@@ -968,14 +969,25 @@ class EigenMap:
                 torch.cuda.empty_cache()
         return preds
 
+    def _tensor_cache_key(self, X_tensor):
+        """Hash a tensor's contents for prediction caching."""
+        data = X_tensor.detach().cpu().numpy().tobytes()
+        return hashlib.sha256(data).hexdigest()
+
     def _predict_tensor(self, X_tensor, models=None, batch_size=64):
         """Forward pass on a (N, 4, L) float tensor. Returns {ct: np.ndarray}.
+
+        Results are cached in self._prediction_cache keyed by tensor hash.
 
         Parameters
         ----------
         models : dict[str, nn.Module] or None
             Pre-loaded {ct: model} dict.  When None, loads models on the fly.
         """
+        cache_key = self._tensor_cache_key(X_tensor)
+        if cache_key in self._prediction_cache:
+            return self._prediction_cache[cache_key]
+
         preds = {}
         for ct in self.cell_types:
             model = models[ct] if models else self._load_model(ct, squeeze=True)
@@ -988,7 +1000,15 @@ class EigenMap:
             if not models:
                 del model
                 torch.cuda.empty_cache()
+
+        self._prediction_cache[cache_key] = preds
         return preds
+
+    def clear_prediction_cache(self):
+        """Clear the in-memory prediction cache."""
+        n = len(self._prediction_cache)
+        self._prediction_cache.clear()
+        print(f"Cleared prediction cache ({n} entries)")
 
     def _load_models(self):
         """Load all cell-type models once. Returns {ct: model}."""
