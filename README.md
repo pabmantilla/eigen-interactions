@@ -14,6 +14,8 @@ em.eigendecompose()
 em.plot_eigendecomp()
 ```
 
+**2D vs 3D eigendecomposition.** With 2 cell types, the DeepSHAP normalization (zero-mean, unit-variance per cell type) forces EI_1's angle to always be 45 degrees, so the eigenvector direction is uninformative. Instead we use **EI_1 var x r** — the variance explained by the first eigenvector multiplied by the Pearson correlation between cell-type importances — yielding a score in [-1, 1]. Negative = cell-type-divergent (opposing importance), near zero = mixed, positive = shared (correlated importance). With 3+ cell types, both the eigenvector angles and variance explained are informative: EI_1's direction in cell-type space reveals which cell types share regulatory grammar.
+
 ## Features
 
 ### Setup
