@@ -878,6 +878,41 @@ class EigenMap:
         plt.tight_layout()
         return fig, ax
 
+    def plot_eigendecomp(self, figsize=(7, 7)):
+        """Predicted activity scatter colored by EI_1 var x r."""
+        assert len(self.cell_types) == 2, "Requires exactly 2 cell types"
+        assert self.predictions, "Run predict() first"
+        assert self.eigen_results, "Run eigendecompose() first"
+
+        ct0, ct1 = self.cell_types
+        x = self.predictions[ct0]
+        y = self.predictions[ct1]
+
+        # Compute EI_1 var x r for each sequence
+        ei1_scores = np.array([
+            r['var_ratio'][0] * np.corrcoef(r['E_scaled'][:, 0], r['E_scaled'][:, 1])[0, 1]
+            for r in self.eigen_results
+        ])
+
+        vmax = np.abs(ei1_scores).max()
+        fig, ax = plt.subplots(figsize=figsize)
+        sc = ax.scatter(x, y, c=ei1_scores, cmap='inferno', vmin=-vmax, vmax=vmax,
+                        s=3, alpha=0.3, edgecolors='none', rasterized=True)
+        cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+        cbar.set_label('EI$_1$ var $\\times$ r')
+
+        lims = [min(x.min(), y.min()), max(x.max(), y.max())]
+        ax.plot(lims, lims, 'k--', linewidth=0.5, alpha=0.4)
+        ax.axhline(0, color='k', linewidth=0.3)
+        ax.axvline(0, color='k', linewidth=0.3)
+        ax.set_xlabel(f'Predicted activity ({ct0})', fontsize=12)
+        ax.set_ylabel(f'Predicted activity ({ct1})', fontsize=12)
+        ax.set_aspect('equal')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.tight_layout()
+        return fig, ax
+
     # ----- steering -----
     def get_top_positions(self, seq_idx=0, eigvec=0, top_k=10):
         """Top positions by |coordinate| on an eigenvector."""

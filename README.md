@@ -11,10 +11,7 @@ em = EigenMap(cell_types=['HepG2', 'K562'], device='cuda')
 em.load_sequences(enhancer_seqs)
 em.compute_attributions(method='deeplift', n_shuffles=20)
 em.eigendecompose()
-em.annotate_motifs()
-em.plot_eigen_logos(seq_idx=0)
-em.necessity_test(seq_idx=0, n_rep=100)
-em.shapley_interaction_index(seq_idx=0, max_order=2, mode='necessity')
+em.plot_eigendecomp()
 ```
 
 ## Features
