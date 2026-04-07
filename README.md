@@ -2,7 +2,7 @@
 
 Eigenvector decomposition of cross-cell-type deep learning attributions for dissecting regulatory grammar in multiplex expression assays (LentiMPRA, STARR-seq, UMI-STARR-seq, etc.). Works with any PyTorch genomic deep learning seq2func model (AlphaGenome, MPRALegNet, DeepSTARR, etc.).
 
-## Quick Start
+## Quick Start (2 cell types)
 
 ```python
 from eigen_steering import EigenMap
@@ -14,7 +14,19 @@ em.eigendecompose()
 em.plot_eigendecomp()
 ```
 
-**2D vs 3D eigendecomposition.** With 2 cell types, the DeepSHAP normalization (zero-mean, unit-variance per cell type) forces EI_1's angle to always be 45 degrees, so the eigenvector direction is uninformative. Instead we use **EI_1 var x r** — the variance explained by the first eigenvector multiplied by the Pearson correlation between cell-type importances — yielding a score in [-1, 1]. Negative = cell-type-divergent (opposing importance), near zero = mixed, positive = shared (correlated importance). With 3+ cell types, both the eigenvector angles and variance explained are informative: EI_1's direction in cell-type space reveals which cell types share regulatory grammar.
+With 2 cell types, the DeepSHAP normalization (zero-mean, unit-variance per cell type) forces EI_1's angle to always be 45 degrees, making the eigenvector direction uninformative. Instead we use **EI_1 var x r** — the variance explained by the first eigenvector multiplied by the Pearson correlation between cell-type importances — yielding a score in [-1, 1]. Negative = cell-type-divergent, near zero = mixed, positive = shared.
+
+## Quick Start (3+ cell types)
+
+```python
+em = EigenMap(cell_types=['HepG2', 'K562', 'WTC11'], device='cuda')
+em.load_sequences(enhancer_seqs)
+em.compute_attributions(method='deeplift', n_shuffles=20)
+em.eigendecompose()
+em.plot_eigendecomp()
+```
+
+With 3+ cell types, both eigenvector angles and variance explained are informative. EI_1's direction in cell-type space reveals which cell types share regulatory grammar.
 
 ## Features
 
