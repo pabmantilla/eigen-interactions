@@ -53,11 +53,11 @@ em.load_from_dataframe(df, seq_col='sequence', n=500, sort_by='activity')
 
 ### Predictions
 
-Forward pass through cell-type models. Set measured activity values for comparison with predicted.
+Forward pass through all cell-type models. Optionally set measured activity for validation.
 
 ```python
-preds = em.predict(constructs, cell_type='HepG2')
-em.set_actual(actual={'HepG2': y_hepg2, 'K562': y_k562})
+preds = em.predict(constructs)  # returns {cell_type: predictions} for all cell types
+em.set_actual(...)  # optional
 ```
 
 ### Attribution Maps
@@ -69,6 +69,8 @@ em.compute_attributions(method='deeplift', n_shuffles=20)
 
 em.save_attributions('attrs.npz')
 em.load_attributions('attrs.npz')
+
+em.plot_attr_logos(seq_idx=0)
 ```
 
 For SLURM-parallelized computation, use the static shard/merge methods:
@@ -85,38 +87,27 @@ PCA on the per-position importance covariance matrix extracts eigenvectors captu
 ```python
 em.eigendecompose()
 em.summary(seq_idx=0)
-```
 
-### Motif Annotation
-
-Scan sequences with JASPAR motifs via tangermeme (TFMoDISco seqlets + TOMTOM). Motif hits are used by all downstream functional tests.
-
-```python
-em.annotate_motifs(meme_file=None, window_size=21)
-em.show_motifs(seq_idx=0)
-```
-
-### Cell-Line-Specific TF Annotations
-
-Re-rank TOMTOM motif hits using a composite binding score informed by the EigenMap mechanism class (EI_1 var x r) and cell-type RNA-seq expression. Filters to TFs actually expressed in each cell line.
-
-```python
-em.load_expression()
-em.rank_motif_hits(min_tpm=1.0)
-em.expression_match(seq_idx=0, top_k=1, min_tpm=1.0)
-em.plot_expression_match(seq_idx=0)
-```
-
-### Visualization
-
-Plot attribution logos, eigenvector logos, position tracks, and cell-type importance scatter plots.
-
-```python
-em.plot_attr_logos(seq_idx=0)
+em.plot_eigendecomp()
 em.plot_eigen_logos(seq_idx=0)
 em.plot_eigentracks(seq_idx=0)
 em.plot_importance_scatter(seq_idx=0)
+```
+
+### Motif Annotation and TF Assignment
+
+Scan sequences with JASPAR motifs via tangermeme (TFMoDISco seqlets + TOMTOM). Motif hits are used by all downstream functional tests. Re-rank TOMTOM hits using a composite binding score informed by the EigenMap mechanism class (EI_1 var x r) and cell-type RNA-seq expression. Filters to TFs actually expressed in each cell line.
+
+```python
+em.annotate_motifs()  # defaults to JASPAR2026 vertebrate motifs
+em.show_motifs(seq_idx=0)
+
+em.load_expression()
+em.rank_motif_hits(min_tpm=1.0)
+em.expression_match(seq_idx=0, top_k=1, min_tpm=1.0)
+
 em.plot_attr_logos_with_motifs(seq_idx=0)
+em.plot_expression_match(seq_idx=0)
 ```
 
 ### Steering
@@ -134,7 +125,10 @@ KO motifs with dinucleotide-shuffle backgrounds (necessity) or KI motifs into sh
 
 ```python
 nec = em.necessity_test(seq_idx=0, n_rep=20)
+em.plot_necessity_summary(nec)
+
 suf = em.sufficiency_test(seq_idx=0, n_rep=20)
+em.plot_sufficiency_summary(suf)
 ```
 
 ### n-SHAPIQ Interactions
@@ -147,6 +141,7 @@ sii = em.shapley_interaction_index(seq_idx=0, max_order=2, mode='necessity')
 
 # motifs + construct context as players
 sii_ctx = em.shapley_interaction_index_context(seq_idx=0, max_order=2, mode='necessity')
+em.plot_shapiq_summary(sii_ctx)
 ```
 
 ### Context SHAP
@@ -155,6 +150,7 @@ sii_ctx = em.shapley_interaction_index_context(seq_idx=0, max_order=2, mode='nec
 
 ```python
 svb = em.shapley_syntax_vs_background(seq_idx=0, n_rep=20)
+em.plot_context_shap_summary(svb)
 ```
 
 ### Motif Context Swap
@@ -183,7 +179,7 @@ em.plot_chipatlas_at_motifs(seq_idx=0)
 ## Directory Structure
 
 ```
-eigen_steering.py              EigenMap class (~3900 lines)
+eigen_steering.py              EigenMap class (~4300 lines)
 ag_deeplift_patches.py         AlphaGenome DeepLIFT hook patches
 fast_logo.py                   Fast logo rendering
 motif_db/                      JASPAR2026 vertebrate motif database

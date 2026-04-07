@@ -1264,6 +1264,105 @@ class EigenMap:
             self._save_cache(cache_dir, cache_hash, 'necessity_test', results)
         return results
 
+    def plot_necessity_summary(self, results, ei1_scores=None,
+                               context_players=('background', 'promoter', 'barcode'),
+                               min_tf_count=3, figsize=(18, 5)):
+        """Plot necessity results: per-motif scatter, TF histogram, per-TF scatter.
+
+        Parameters
+        ----------
+        results : list — output of necessity_test()
+        ei1_scores : array-like or None — EI_1 var x r per sequence.
+            If None, computed from self.eigen_results.
+        """
+        import matplotlib.pyplot as plt
+        if ei1_scores is None:
+            ei1_scores = np.array([
+                r['var_ratio'][0] * np.corrcoef(
+                    r['E_scaled'][:, 0], r['E_scaled'][:, 1])[0, 1]
+                for r in self.eigen_results
+            ])
+
+        # collect 1st-order rows
+        rows = []
+        for si, tests in enumerate(results):
+            if tests is None:
+                continue
+            for t in tests:
+                if t['order'] != 1:
+                    continue
+                tf = t['motifs'][0]['tf']
+                rows.append({
+                    'seq_idx': si,
+                    'annotation_ct': t['annotation_ct'],
+                    'tf': tf,
+                    'player_type': tf if tf in context_players else 'motif',
+                    **{f'nec_{ct}': -t['scores'][ct] for ct in self.cell_types},
+                    'EI_1_vxr': ei1_scores[si],
+                })
+        import pandas as pd
+        nec_df = pd.DataFrame(rows)
+        ct0, ct1 = self.cell_types
+
+        figs = []
+        for act in self.cell_types:
+            sub = nec_df[(nec_df.annotation_ct == act) & (nec_df.player_type == 'motif')]
+            if len(sub) == 0:
+                continue
+            fig, axes = plt.subplots(1, 3, figsize=figsize)
+            fig.suptitle(f'{act}-annotated motifs', fontsize=12)
+
+            # 1) per-motif scatter
+            order = np.argsort(np.abs(sub['EI_1_vxr'].values))
+            sc = axes[0].scatter(
+                sub[f'nec_{ct0}'].values[order], sub[f'nec_{ct1}'].values[order],
+                s=12, alpha=0.6, c=sub['EI_1_vxr'].values[order],
+                cmap='inferno', vmin=-1, vmax=1, edgecolors='none')
+            lim = np.abs(sub[[f'nec_{ct0}', f'nec_{ct1}']].values).max() * 1.1
+            axes[0].set_xlim(-lim, lim); axes[0].set_ylim(-lim, lim)
+            axes[0].axhline(0, c='k', lw=0.5); axes[0].axvline(0, c='k', lw=0.5)
+            axes[0].plot([-lim, lim], [-lim, lim], 'k--', lw=0.5, alpha=0.3)
+            axes[0].set_xlabel(f'Necessity {ct0}'); axes[0].set_ylabel(f'Necessity {ct1}')
+            plt.colorbar(sc, ax=axes[0], label='EI$_1$ var $\\times$ r')
+            axes[0].set_title('1st-order (per motif)')
+
+            # 2) TF histogram
+            tf_h = sub.groupby('tf')[f'nec_{ct0}'].mean()
+            tf_k = sub.groupby('tf')[f'nec_{ct1}'].mean()
+            axes[1].hist(tf_h, bins=30, alpha=0.6, color='#cb181d', label=ct0)
+            axes[1].hist(tf_k, bins=30, alpha=0.6, color='#2171b5', label=ct1)
+            axes[1].axvline(0, c='k', lw=0.5)
+            axes[1].set_xlabel('Mean necessity per TF'); axes[1].set_ylabel('# TFs')
+            axes[1].legend(fontsize=8); axes[1].set_title('TF distribution')
+
+            # 3) per-TF scatter
+            tf_agg = sub.groupby('tf').agg(
+                h=(f'nec_{ct0}', 'mean'), k=(f'nec_{ct1}', 'mean'),
+                ei=('EI_1_vxr', 'mean'), n=('seq_idx', 'count')).reset_index()
+            tf_agg = tf_agg[tf_agg.n >= min_tf_count]
+            tf_agg['off_diag'] = np.abs(tf_agg.h - tf_agg.k)
+            order_tf = np.argsort(np.abs(tf_agg['ei'].values))
+            sc2 = axes[2].scatter(
+                tf_agg.h.values[order_tf], tf_agg.k.values[order_tf],
+                s=tf_agg.n.values[order_tf] * 3, alpha=0.7,
+                c=tf_agg.ei.values[order_tf],
+                cmap='inferno', vmin=-1, vmax=1, edgecolors='k', linewidths=0.3)
+            tlim = np.abs(tf_agg[['h', 'k']].values).max() * 1.2
+            axes[2].set_xlim(-tlim, tlim); axes[2].set_ylim(-tlim, tlim)
+            axes[2].axhline(0, c='k', lw=0.5); axes[2].axvline(0, c='k', lw=0.5)
+            axes[2].plot([-tlim, tlim], [-tlim, tlim], 'k--', lw=0.5, alpha=0.3)
+            axes[2].set_xlabel(f'Mean necessity {ct0}')
+            axes[2].set_ylabel(f'Mean necessity {ct1}')
+            plt.colorbar(sc2, ax=axes[2], label='mean EI$_1$ var $\\times$ r')
+            axes[2].set_title(f'Per-TF (n>={min_tf_count}, size=count)')
+
+            for ax in axes:
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            figs.append((fig, axes))
+        return figs
+
     def sufficiency_test(self, seq_idx=None, n_rep=20, suf_order=1,
                          suff_pos=None, batch_size=64, random_state=None,
                          include_context_players=True,
@@ -1469,6 +1568,100 @@ class EigenMap:
         if cache_dir is not None:
             self._save_cache(cache_dir, cache_hash, 'sufficiency_test', results)
         return results
+
+    def plot_sufficiency_summary(self, results, ei1_scores=None,
+                                  context_players=('background', 'promoter', 'barcode'),
+                                  min_tf_count=3, figsize=(18, 5)):
+        """Plot sufficiency results: per-motif scatter, TF histogram, per-TF scatter.
+
+        Parameters
+        ----------
+        results : list — output of sufficiency_test()
+        ei1_scores : array-like or None — EI_1 var x r per sequence.
+        """
+        import matplotlib.pyplot as plt
+        if ei1_scores is None:
+            ei1_scores = np.array([
+                r['var_ratio'][0] * np.corrcoef(
+                    r['E_scaled'][:, 0], r['E_scaled'][:, 1])[0, 1]
+                for r in self.eigen_results
+            ])
+
+        rows = []
+        for si, tests in enumerate(results):
+            if tests is None:
+                continue
+            for t in tests:
+                if t['order'] != 1:
+                    continue
+                tf = t['motifs'][0]['tf']
+                rows.append({
+                    'seq_idx': si,
+                    'annotation_ct': t['annotation_ct'],
+                    'tf': tf,
+                    'player_type': tf if tf in context_players else 'motif',
+                    **{f'suf_{ct}': t['scores'][ct] for ct in self.cell_types},
+                    'EI_1_vxr': ei1_scores[si],
+                })
+        import pandas as pd
+        suf_df = pd.DataFrame(rows)
+        ct0, ct1 = self.cell_types
+
+        figs = []
+        for act in self.cell_types:
+            sub = suf_df[(suf_df.annotation_ct == act) & (suf_df.player_type == 'motif')]
+            if len(sub) == 0:
+                continue
+            fig, axes = plt.subplots(1, 3, figsize=figsize)
+            fig.suptitle(f'{act}-annotated motifs', fontsize=12)
+
+            order = np.argsort(np.abs(sub['EI_1_vxr'].values))
+            sc = axes[0].scatter(
+                sub[f'suf_{ct0}'].values[order], sub[f'suf_{ct1}'].values[order],
+                s=12, alpha=0.6, c=sub['EI_1_vxr'].values[order],
+                cmap='inferno', vmin=-1, vmax=1, edgecolors='none')
+            lim = np.abs(sub[[f'suf_{ct0}', f'suf_{ct1}']].values).max() * 1.1
+            axes[0].set_xlim(-lim, lim); axes[0].set_ylim(-lim, lim)
+            axes[0].axhline(0, c='k', lw=0.5); axes[0].axvline(0, c='k', lw=0.5)
+            axes[0].plot([-lim, lim], [-lim, lim], 'k--', lw=0.5, alpha=0.3)
+            axes[0].set_xlabel(f'Sufficiency {ct0}'); axes[0].set_ylabel(f'Sufficiency {ct1}')
+            plt.colorbar(sc, ax=axes[0], label='EI$_1$ var $\\times$ r')
+            axes[0].set_title('1st-order (per motif)')
+
+            tf_h = sub.groupby('tf')[f'suf_{ct0}'].mean()
+            tf_k = sub.groupby('tf')[f'suf_{ct1}'].mean()
+            axes[1].hist(tf_h, bins=30, alpha=0.6, color='#cb181d', label=ct0)
+            axes[1].hist(tf_k, bins=30, alpha=0.6, color='#2171b5', label=ct1)
+            axes[1].axvline(0, c='k', lw=0.5)
+            axes[1].set_xlabel('Mean sufficiency per TF'); axes[1].set_ylabel('# TFs')
+            axes[1].legend(fontsize=8); axes[1].set_title('TF distribution')
+
+            tf_agg = sub.groupby('tf').agg(
+                h=(f'suf_{ct0}', 'mean'), k=(f'suf_{ct1}', 'mean'),
+                ei=('EI_1_vxr', 'mean'), n=('seq_idx', 'count')).reset_index()
+            tf_agg = tf_agg[tf_agg.n >= min_tf_count]
+            tf_agg['off_diag'] = np.abs(tf_agg.h - tf_agg.k)
+            order_tf = np.argsort(np.abs(tf_agg['ei'].values))
+            sc2 = axes[2].scatter(
+                tf_agg.h.values[order_tf], tf_agg.k.values[order_tf],
+                s=tf_agg.n.values[order_tf] * 3, alpha=0.7,
+                c=tf_agg.ei.values[order_tf],
+                cmap='inferno', vmin=-1, vmax=1, edgecolors='k', linewidths=0.3)
+            tlim = np.abs(tf_agg[['h', 'k']].values).max() * 1.2
+            axes[2].set_xlim(-tlim, tlim); axes[2].set_ylim(-tlim, tlim)
+            axes[2].axhline(0, c='k', lw=0.5); axes[2].axvline(0, c='k', lw=0.5)
+            axes[2].plot([-tlim, tlim], [-tlim, tlim], 'k--', lw=0.5, alpha=0.3)
+            axes[2].set_xlabel(f'Mean sufficiency {ct0}')
+            axes[2].set_ylabel(f'Mean sufficiency {ct1}')
+            plt.colorbar(sc2, ax=axes[2], label='mean EI$_1$ var $\\times$ r')
+            axes[2].set_title(f'Per-TF (n>={min_tf_count}, size=count)')
+
+            for ax in axes:
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            figs.append((fig, axes))
+        return figs
 
     def shapley_interaction_index(self, seq_idx=None, max_order=2, n_rep=20,
                                   batch_size=128, random_state=None,
@@ -1900,6 +2093,97 @@ class EigenMap:
                              'shapley_interaction_index_context', results)
         return results
 
+    def plot_shapiq_summary(self, results, top_n=10, figsize=(14, 5)):
+        """Bar chart of top interactions by mean max |SII| fraction per cell type.
+
+        Parameters
+        ----------
+        results : list[dict] — output of shapley_interaction_index_context()
+            Each entry is {annotation_ct: {motifs, player_types, interactions, ...}}
+        """
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        LEGEND_COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+                         '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990']
+
+        # flatten results into dataframe
+        rows = []
+        for si, res in enumerate(results):
+            if res is None:
+                continue
+            for act, act_res in res.items():
+                if act_res['n_players'] == 0:
+                    continue
+                player_names = act_res['motifs']
+                player_types = act_res['player_types']
+                for interaction_key, ct_scores in act_res['interactions'].items():
+                    order = len(interaction_key)
+                    if order == 0:
+                        itype = 'null'
+                    elif order == 1:
+                        t = player_types[interaction_key[0]]
+                        itype = player_names[interaction_key[0]] if t == 'motif' else 'background'
+                    else:
+                        motif_names = [player_names[i] for i in interaction_key
+                                       if player_types[i] == 'motif']
+                        has_bg = any(player_types[i] != 'motif' for i in interaction_key)
+                        if len(motif_names) == 0:
+                            itype = 'background'
+                        else:
+                            itype = '+'.join(motif_names)
+                            if has_bg:
+                                itype += '+bg'
+                    for ct, score in ct_scores.items():
+                        rows.append({
+                            'seq_idx': si, 'annotation_ct': act,
+                            'scoring_ct': ct, 'order': order,
+                            'itype': itype, 'sii_score': score,
+                        })
+
+        ctx_df = pd.DataFrame(rows)
+        ctx_df['abs_sii'] = ctx_df['sii_score'].abs()
+        mask = ctx_df.order >= 1
+        total = ctx_df[mask].groupby(
+            ['seq_idx', 'annotation_ct', 'scoring_ct'])['abs_sii'].transform('sum')
+        ctx_df['sii_frac'] = 0.0
+        ctx_df.loc[mask, 'sii_frac'] = ctx_df.loc[mask, 'abs_sii'] / total
+
+        # diagonal only, skip background-max seqs
+        diag = ctx_df[(ctx_df.annotation_ct == ctx_df.scoring_ct) & (ctx_df.order >= 1)]
+        max_rows = diag.loc[diag.groupby(['seq_idx', 'scoring_ct'])['sii_frac'].idxmax()]
+        bg_mask = max_rows['itype'] == 'background'
+        bg_keys = max_rows.loc[bg_mask, ['seq_idx', 'scoring_ct']]
+        non_bg = diag[diag['itype'] != 'background']
+        fallback = []
+        for _, row in bg_keys.iterrows():
+            sub = non_bg[(non_bg['seq_idx'] == row['seq_idx']) &
+                         (non_bg['scoring_ct'] == row['scoring_ct'])]
+            if len(sub) > 0:
+                fallback.append(sub.loc[sub['sii_frac'].idxmax()])
+        if fallback:
+            max_rows = pd.concat([max_rows[~bg_mask], pd.DataFrame(fallback)])
+
+        fig, axes = plt.subplots(1, len(self.cell_types), figsize=figsize)
+        if len(self.cell_types) == 1:
+            axes = [axes]
+        for ax, ct in zip(axes, self.cell_types):
+            sub = max_rows[max_rows.scoring_ct == ct]
+            means = sub.groupby('itype')['sii_frac'].mean().sort_values(
+                ascending=False).head(top_n)
+            colors = [LEGEND_COLORS[i % len(LEGEND_COLORS)] for i in range(len(means))]
+            ax.barh(range(len(means)), means.values, color=colors)
+            ax.set_yticks(range(len(means)))
+            ax.set_yticklabels(means.index, fontsize=8)
+            ax.set_xlabel('mean max sii_frac')
+            ax.set_title(f'{ct} (n={len(sub)} seqs)')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+        plt.suptitle('Top interactions by mean max sii_frac per sequence', fontsize=12)
+        plt.tight_layout()
+        return fig, axes
+
     def shapley_syntax_vs_background(self, seq_idx=None, n_rep=20,
                                       batch_size=128, random_state=None,
                                       cache_dir=None):
@@ -2030,6 +2314,69 @@ class EigenMap:
             self._save_cache(cache_dir, cache_hash,
                              'shapley_syntax_vs_background', results)
         return results
+
+    def plot_context_shap_summary(self, results, ei1_scores=None, figsize=(12, 5)):
+        """Plot context SHAP: syntax vs background Shapley values per cell type.
+
+        Parameters
+        ----------
+        results : list[dict] — output of shapley_syntax_vs_background()
+            Each entry is {annotation_ct: {shap_syntax, shap_background, ...}}
+        ei1_scores : array-like or None — EI_1 var x r per sequence.
+        """
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        if ei1_scores is None:
+            ei1_scores = np.array([
+                r['var_ratio'][0] * np.corrcoef(
+                    r['E_scaled'][:, 0], r['E_scaled'][:, 1])[0, 1]
+                for r in self.eigen_results
+            ])
+
+        rows = []
+        for si, res in enumerate(results):
+            if res is None:
+                continue
+            for act, act_res in res.items():
+                for ct in self.cell_types:
+                    rows.append({
+                        'seq_idx': si, 'annotation_ct': act,
+                        'scoring_ct': ct,
+                        'shap_syntax': act_res['shap_syntax'][ct],
+                        'shap_background': act_res['shap_background'][ct],
+                        'EI_1_vxr': ei1_scores[si],
+                    })
+        svb_df = pd.DataFrame(rows)
+
+        # diagonal only (annotation_ct == scoring_ct)
+        diag = svb_df[svb_df.annotation_ct == svb_df.scoring_ct]
+
+        fig, axes = plt.subplots(1, len(self.cell_types), figsize=figsize)
+        if len(self.cell_types) == 1:
+            axes = [axes]
+        for ax, ct in zip(axes, self.cell_types):
+            sub = diag[diag.scoring_ct == ct]
+            if len(sub) == 0:
+                continue
+            order = np.argsort(np.abs(sub['EI_1_vxr'].values))
+            sc = ax.scatter(
+                sub['shap_syntax'].values[order],
+                sub['shap_background'].values[order],
+                s=12, alpha=0.6, c=sub['EI_1_vxr'].values[order],
+                cmap='inferno', vmin=-1, vmax=1, edgecolors='none')
+            ax.axhline(0, c='k', lw=0.5); ax.axvline(0, c='k', lw=0.5)
+            lim = max(np.abs(sub[['shap_syntax', 'shap_background']].values).max() * 1.1, 0.1)
+            ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.5, alpha=0.3)
+            ax.set_xlabel('SHAP(syntax)'); ax.set_ylabel('SHAP(background)')
+            ax.set_title(f'{ct} (n={len(sub)})')
+            plt.colorbar(sc, ax=ax, label='EI$_1$ var $\\times$ r')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+        plt.suptitle('Context SHAP: syntax vs background', fontsize=12)
+        plt.tight_layout()
+        return fig, axes
 
     # ------------------------------------------------------------------
     # Motif context swap
