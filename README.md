@@ -163,6 +163,25 @@ em.motif_context_swap(seq_idx=None, swap='activity', n_rep=20)
 em.motif_context_swap(seq_idx=None, swap='mechanism', n_rep=20)
 ```
 
+### SEAM (Surrogate Explainability Attribution Maps)
+
+Run mutagenesis, DeepSHAP attribution, and KMeans clustering + MetaExplainer foreground/background separation in a single call. This is a convenience wrapper for quick exploratory analysis on a few sequences.
+
+```python
+results = em.seam(seq_idx=0, cell_type='K562', library_size=25000,
+                  mut_rate=0.10, n_clusters=30, n_shuffles=20)
+
+# Access results
+fg = results['K562'][0]['foreground']       # (230, 4) scaled foreground
+bg = results['K562'][0]['background']       # (230, 4) average background
+preds = results['K562'][0]['predictions']   # (25000,) model predictions
+
+# Mutagenize only a subregion
+results = em.seam(seq_idx=0, positions=(50, 150))
+```
+
+**Scaling note:** This method runs the full pipeline sequentially on a single GPU. For large-scale SEAM runs (hundreds+ of sequences), split the pipeline into separate mutagenesis, attribution, and clustering steps and submit as SLURM array jobs across multiple GPUs. See `SEAM_target_spaces/scripts/` in the parent repo for a production-scale example.
+
 ### Genomic Context (ChIP-Atlas)
 
 Map sequences to hg38 coordinates and query ChIP-Atlas for TF binding at sequence loci. Cross-reference binding data with motif positions.
@@ -179,7 +198,7 @@ em.plot_chipatlas_at_motifs(seq_idx=0)
 ## Directory Structure
 
 ```
-eigen_steering.py              EigenMap class (~4300 lines)
+eigen_steering.py              EigenMap class (~4600 lines)
 ag_deeplift_patches.py         AlphaGenome DeepLIFT hook patches
 fast_logo.py                   Fast logo rendering
 motif_db/                      JASPAR2026 vertebrate motif database
@@ -191,6 +210,7 @@ scripts/                       Analysis notebooks
 ```bash
 pip install tangermeme torch numpy pandas matplotlib
 pip install shapiq  # for n-SHAPIQ methods
+pip install squid-nn seam-nn  # for SEAM method (install seam-nn with --no-deps if no TF needed)
 ```
 
 ## Model Weights
