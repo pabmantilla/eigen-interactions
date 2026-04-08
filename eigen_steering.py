@@ -4412,6 +4412,203 @@ class EigenMap:
             seq_idx, matches, value_key='peak_score',
             unit='ChIP peak score', figsize=figsize)
 
+    # ------------------------------------------------------------------
+    # SEAM: mutagenesis → DeepSHAP → KMeans → MetaExplainer
+    # ------------------------------------------------------------------
+
+    def seam(self, seq_idx, cell_type=None, library_size=25000, mut_rate=0.10,
+             n_clusters=30, n_shuffles=20, positions=None, batch_size=512,
+             entropy_multiplier=0.5, verbose=True):
+        """Run the full SEAM pipeline on selected sequences.
+
+        Parameters
+        ----------
+        seq_idx : int or list[int]
+            Which sequence(s) to process.
+        cell_type : str or None
+            Cell type model to use. None = all self.cell_types.
+        library_size : int
+            Total sequences (WT + library_size-1 mutants).
+        mut_rate : float
+            Per-position mutation rate.
+        n_clusters : int
+            Number of KMeans clusters.
+        n_shuffles : int
+            Dinucleotide shuffle references for DeepSHAP.
+        positions : tuple(int,int) or None
+            (start, end) to mutagenize. None = full enhancer.
+        batch_size : int
+            Batch size for predictions and DeepSHAP.
+        entropy_multiplier : float
+            Passed to MetaExplainer.compute_background.
+        verbose : bool
+            Print progress.
+
+        Returns
+        -------
+        dict[str, dict[int, dict]]
+            Keyed by cell_type -> seq_idx -> result dict.
+        """
+        import gc
+        try:
+            import squid
+            from seam import Compiler, Clusterer, MetaExplainer
+        except ImportError:
+            raise ImportError("SEAM requires: pip install squid-nn seam-nn")
+
+        seq_idxs = self._resolve_seq_idxs(seq_idx)
+        cts = [cell_type] if cell_type else list(self.cell_types)
+        models = self._load_models()
+
+        results = {}
+        for ct in cts:
+            results[ct] = {}
+            model = models[ct]
+
+            for si in seq_idxs:
+                if verbose:
+                    print(f"[SEAM] {ct} seq {si}: mutagenesis...")
+
+                # --- Step 1: Mutagenesis ---
+                wt_cf = self.X[si].numpy() if isinstance(self.X, torch.Tensor) else self.X[si]  # (4, 281)
+                wt_enh_nlc = wt_cf[:, :ENHANCER_LEN].T  # (230, 4)
+
+                mut_generator = squid.mutagenizer.RandomMutagenesis(
+                    mut_rate=mut_rate, seed=42)
+
+                if positions is not None:
+                    start, end = positions
+                    sub_nlc = wt_enh_nlc[start:end]
+                    x_mut_sub = mut_generator(sub_nlc, num_sim=library_size - 1)
+                    x_mut = np.tile(wt_enh_nlc, (library_size - 1, 1, 1))
+                    x_mut[:, start:end, :] = x_mut_sub
+                else:
+                    x_mut = mut_generator(wt_enh_nlc, num_sim=library_size - 1)
+
+                x_all_nlc = np.concatenate(
+                    [wt_enh_nlc[np.newaxis], x_mut], axis=0)  # (library_size, 230, 4)
+
+                # --- Step 2: Predictions + DeepSHAP ---
+                if verbose:
+                    print(f"[SEAM] {ct} seq {si}: predictions + DeepSHAP...")
+
+                # NLC -> NCL, pad with promoter+barcode
+                x_all_cf = x_all_nlc.transpose(0, 2, 1)  # (library_size, 4, 230)
+                suffix = wt_cf[:, ENHANCER_LEN:]  # (4, 51)
+                suffix_tiled = np.tile(suffix, (library_size, 1, 1))
+                x_all_281 = np.concatenate(
+                    [x_all_cf, suffix_tiled], axis=2)  # (library_size, 4, 281)
+
+                X_tensor = torch.from_numpy(x_all_281).float()
+
+                # Batched predictions
+                predictions = []
+                with torch.no_grad():
+                    for i in range(0, len(X_tensor), batch_size):
+                        batch = X_tensor[i:i+batch_size].to(self.device)
+                        pred = model(batch).squeeze(-1).cpu().numpy()
+                        predictions.append(pred)
+                predictions = np.concatenate(predictions)
+
+                # DeepSHAP
+                wt_tensor = X_tensor[0:1]
+                wt_refs = dinucleotide_shuffle(
+                    wt_tensor, n=n_shuffles, random_state=42)
+                refs = wt_refs.expand(library_size, -1, -1, -1)
+
+                attr = deep_lift_shap(
+                    model, X_tensor, target=0, references=refs,
+                    hypothetical=True, batch_size=batch_size,
+                    device=self.device,
+                    additional_nonlinear_ops={AGCustomGELU: _nonlinear},
+                    warning_threshold=0.01, verbose=False,
+                ).cpu().numpy()
+
+                # Mean-center, trim to enhancer, convert to NLC
+                attr = attr - attr.mean(axis=1, keepdims=True)
+                attr_enh = attr[:, :, :ENHANCER_LEN]  # (library_size, 4, 230)
+                attr_nlc = attr_enh.transpose(0, 2, 1)  # (library_size, 230, 4)
+
+                # --- Step 3: SEAM clustering + MetaExplainer ---
+                if verbose:
+                    print(f"[SEAM] {ct} seq {si}: clustering + MetaExplainer...")
+
+                clusterer = Clusterer(attr_nlc, gpu=False)
+                cluster_labels = clusterer.cluster(
+                    embedding=clusterer.maps, method='kmeans',
+                    n_clusters=n_clusters)
+
+                # Compile MAVE dataframe
+                compiler = Compiler(
+                    x=x_all_nlc, y=predictions,
+                    x_ref=wt_enh_nlc[np.newaxis],
+                    y_bg=None, alphabet=['A', 'C', 'G', 'T'], gpu=False)
+                mave_df = compiler.compile()
+
+                # MetaExplainer
+                clusterer2 = Clusterer(attr_nlc, gpu=False)
+                clusterer2.cluster_labels = cluster_labels
+
+                meta = MetaExplainer(
+                    clusterer=clusterer2, mave_df=mave_df,
+                    attributions=attr_nlc, sort_method='median',
+                    ref_idx=0, mut_rate=mut_rate)
+                msm = meta.generate_msm(gpu=False)
+                meta.compute_background(
+                    mut_rate=mut_rate,
+                    entropy_multiplier=entropy_multiplier,
+                    adaptive_background_scaling=True,
+                    process_logos=False)
+
+                # Extract foreground
+                if meta.cluster_order is not None:
+                    mapping = {old: new for new, old in enumerate(
+                        meta.cluster_order)}
+                    meta.membership_df['Cluster_Sorted'] = (
+                        meta.membership_df['Cluster'].map(mapping))
+                    ref_cluster = meta.membership_df.loc[
+                        0, 'Cluster_Sorted']
+                else:
+                    ref_cluster = meta.membership_df.loc[0, 'Cluster']
+
+                ref_cluster_avg = np.mean(
+                    meta.get_cluster_maps(ref_cluster), axis=0)
+                bg_scale = (meta.background_scaling[ref_cluster]
+                            if meta.background_scaling is not None
+                            else 1.0)
+                foreground = ref_cluster_avg - bg_scale * meta.background
+
+                cluster_maps = np.stack([
+                    np.mean(meta.get_cluster_maps(k), axis=0)
+                    for k in range(n_clusters)])
+
+                # WT attribution
+                wt_attr = attr_nlc[0]  # (230, 4)
+
+                results[ct][si] = {
+                    'foreground': foreground,
+                    'background': meta.background,
+                    'background_scaled': bg_scale * meta.background,
+                    'wt_attribution': wt_attr,
+                    'ref_cluster_avg': ref_cluster_avg,
+                    'cluster_labels': cluster_labels,
+                    'cluster_maps': cluster_maps,
+                    'ref_cluster_idx': int(ref_cluster),
+                    'predictions': predictions,
+                    'bg_scale': bg_scale,
+                }
+
+                if verbose:
+                    print(f"[SEAM] {ct} seq {si}: done. "
+                          f"ref_cluster={ref_cluster}, "
+                          f"bg_scale={bg_scale:.3f}")
+
+                # Clean up GPU memory
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        return results
+
 
 # ---------------------------------------------------------------------------
 # CLI for SLURM array jobs
