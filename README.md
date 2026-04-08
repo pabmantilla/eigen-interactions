@@ -1,6 +1,6 @@
 # eigen-interactions
 
-Eigenvector decomposition of cross-cell-type deep learning attributions for dissecting regulatory grammar in multiplex expression assays (LentiMPRA, STARR-seq, UMI-STARR-seq, etc.). Works with any PyTorch genomic deep learning seq2func model (AlphaGenome, MPRALegNet, DeepSTARR, etc.).
+Eigenvector characterization of regulatory mechanisms from attribution maps alone for dissecting regulatory grammar from genomic seq2func-DNNs trained on multiplex expression assays (LentiMPRA, STARR-seq, UMI-STARR-seq, etc.) like AlphaGenome, MPRALegNet, and DeepSTARR. EigenMaps avoids the use of motif discovery or annotation tools to characterize regulatory mechanisms by defining the variance of mechanisms between conditions (eg. cell-lines) with linear combinations of condition-specific attribution scores. We focus on the cell type example for the README.
 
 ## Quick Start (2 cell types)
 
