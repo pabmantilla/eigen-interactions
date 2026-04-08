@@ -1,6 +1,8 @@
 # eigen-interactions
 
-Eigenvector characterization of regulatory mechanisms from attribution maps alone for dissecting regulatory grammar from genomic seq2func-DNNs trained on multiplex expression assays (LentiMPRA, STARR-seq, UMI-STARR-seq, etc.) like AlphaGenome, MPRALegNet, and DeepSTARR. EigenMaps avoids the use of motif discovery or annotation tools to characterize regulatory mechanisms by defining the variance of mechanisms between conditions (eg. cell-lines) with linear combinations of condition-specific attribution scores. We focus on the cell type example for the README.
+This repo contains EigenMaps, a method for eigenvector characterization of regulatory mechanisms from k-condition attribution maps alone, allowing the dissection of regulatory grammar learned by genomic seq2func-DNNs trained on multiplex expression assays (LentiMPRA, STARR-seq, UMI-STARR-seq, etc.). EigenMaps avoids the use of motif discovery or annotation tools to characterize regulatory mechanisms by defining the variance of mechanisms between conditions (eg. cell-lines) with linear combinations of condition-specific attribution scores. When k=2, we can use single scalar 's' to describe the relative mechanism of each sequence. When k>2, we use the deviation from the (k-1)-dimensional diagonal hyperplane to describe the relative mechanism of each sequence.
+
+We focus on the k=2 cell lines (HepG2 and K562) example for the README.
 
 ## Quick Start (2 cell types)
 
