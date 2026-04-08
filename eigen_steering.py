@@ -3197,18 +3197,22 @@ class EigenMap:
         return results
 
     # ----- mechanism-aware motif ranking -----
-    def rank_motif_hits(self, min_tpm=1.0):
-        """Re-rank TOMTOM hits by binding probability using EI mechanism + expression.
+    def annotate_tf_binding(self, method='gaussian', min_tpm=1.0):
+        """Re-rank TOMTOM hits by binding score using EI mechanism + expression.
 
-        Uses eigendecomposition results (must already exist) to compute a
-        per-sequence mechanism score s = ei1_var * r, then for each motif
-        hit re-ranks the TOMTOM candidates with a deterministic binding score
-        based purely on expression compatibility:
+        Parameters
+        ----------
+        method : str
+            'gaussian' — Gaussian overlap scoring that weighs shared vs
+            cell-type-specific expression using a kernel width estimated
+            from the expressed TF population.
+            'linear' — original linear interpolation via _binding_score().
+        min_tpm : float
+            Minimum TPM to consider a TF expressed (used for SIGMA estimation
+            in gaussian mode).
 
-            w = (1 + s) / 2          # 0 at s=-1, 0.5 at s=0, 1 at s=1
-            shared   = mean(log(TPM+1)) across cell types
-            specific = log(TPM+1) in detecting CT - max(others)
-            binding_score = w * shared + (1 - w) * specific
+        Uses eigendecomposition results to compute per-sequence mechanism
+        score s = ei1_var * r, then re-ranks TOMTOM candidates per hit.
 
         Results stored in self.motif_hits_ranked (same structure as motif_hits).
         Requires: eigendecompose(), annotate_motifs(), load_expression()
@@ -3216,6 +3220,8 @@ class EigenMap:
         assert self.eigen_results, "Run eigendecompose() first."
         assert hasattr(self, 'motif_hits'), "Run annotate_motifs() first."
         assert hasattr(self, 'tf_tpm'), "Run load_expression() first."
+        assert method in ('gaussian', 'linear'), \
+            f"method must be 'gaussian' or 'linear', got '{method}'"
 
         n_seqs = len(self.eigen_results)
         n_ct = len(self.cell_types)
@@ -3235,6 +3241,23 @@ class EigenMap:
                 corr = np.mean(corrs)
             self.mechanism_scores[si] = ei1_var * (corr if np.isfinite(corr) else 0.0)
 
+        # Estimate SIGMA for gaussian method
+        if method == 'gaussian':
+            lfcs = []
+            for tf in self.tf_tpm:
+                tpms = [self.tf_tpm[tf].get(ct, 0) for ct in self.cell_types]
+                if max(tpms) < min_tpm:
+                    continue
+                log_tpms = [np.log1p(t) for t in tpms]
+                # pairwise |LFC| for 2+ cell types
+                for i in range(len(log_tpms)):
+                    for j in range(i + 1, len(log_tpms)):
+                        lfcs.append(abs(log_tpms[i] - log_tpms[j]))
+            self.sigma = float(np.median(lfcs)) if lfcs else 1.0
+            score_fn = self._binding_score_gaussian
+        else:
+            score_fn = self._binding_score
+
         # Re-rank motif hits per cell type
         self.motif_hits_ranked = {}
         for ct in self.cell_types:
@@ -3247,7 +3270,7 @@ class EigenMap:
                                        [{'tf': h['tf'], 'pval': h['pval']}])
                     scored = []
                     for cand in candidates:
-                        bs = self._binding_score(cand['tf'], ct, s)
+                        bs = score_fn(cand['tf'], ct, s)
                         scored.append({**cand, 'binding_score': bs})
                     scored.sort(key=lambda x: x['binding_score'], reverse=True)
                     seq_hits.append({
@@ -3269,9 +3292,45 @@ class EigenMap:
                         n_changed += 1
         total = sum(len(self.motif_hits[ct][si])
                     for ct in self.cell_types for si in range(n_seqs))
-        print(f"Ranked motif hits: {n_changed}/{total} TF assignments changed "
-              f"across {n_seqs} sequences")
+        print(f"annotate_tf_binding({method}): {n_changed}/{total} TF assignments "
+              f"changed across {n_seqs} sequences"
+              + (f" (sigma={self.sigma:.3f})" if method == 'gaussian' else ""))
         return self
+
+    def _binding_score_gaussian(self, tf_name, detecting_ct, mechanism_score):
+        """Gaussian overlap binding score from expression + EI mechanism.
+
+        Uses a Gaussian kernel (width self.sigma) to smoothly interpolate
+        between shared and cell-type-specific expression weighting based
+        on the log-fold-change of TF expression.
+        """
+        components = self._parse_tf_components(tf_name)
+
+        # Best expression per cell type across subunits
+        log_expr = {}
+        for ct in self.cell_types:
+            tpm = max((self.tf_tpm.get(g, {}).get(ct, 0.0)
+                       for g in components), default=0.0)
+            log_expr[ct] = np.log1p(tpm)
+
+        # LFC: detecting vs best of others
+        other_cts = [ct for ct in self.cell_types if ct != detecting_ct]
+        other_max = max(log_expr[ct] for ct in other_cts) if other_cts else 0.0
+        lfc = log_expr[detecting_ct] - other_max
+
+        # Gaussian overlap
+        overlap = np.exp(-lfc**2 / (2 * self.sigma**2))
+
+        # Mechanism weight
+        s = np.clip(mechanism_score, -1, 1)
+        w = (1 + s) / 2
+
+        # Shared vs specific components
+        separation = (1 - overlap) * (1 + np.clip(lfc, 0, None))
+        base_shared = np.mean(list(log_expr.values()))
+        base_detect = log_expr[detecting_ct]
+
+        return w * base_shared * overlap + (1 - w) * base_detect * separation
 
     def _binding_score(self, tf_name, detecting_ct, mechanism_score):
         """Deterministic binding score from expression + EI mechanism.
