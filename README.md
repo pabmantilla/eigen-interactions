@@ -163,7 +163,7 @@ em.motif_context_swap(seq_idx=None, swap='activity', n_rep=20)
 em.motif_context_swap(seq_idx=None, swap='mechanism', n_rep=20)
 ```
 
-### SEAM (Surrogate Explainability Attribution Maps)
+### SEAM (Systematic Explanation of Attribution-based Mechanisms)
 
 Run mutagenesis, DeepSHAP attribution, and KMeans clustering + MetaExplainer foreground/background separation in a single call. This is a convenience wrapper for quick exploratory analysis on a few sequences.
 
