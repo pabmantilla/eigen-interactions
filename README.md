@@ -146,7 +146,7 @@ em.plot_shapiq_summary(sii_ctx)
 
 ### Context SHAP
 
-2-player Shapley decomposition quantifying how much expression is driven by motif syntax vs flanking/background sequence.
+2-player Shapley decomposition quantifying how much expression is driven by motif syntax vs background.
 
 ```python
 svb = em.shapley_syntax_vs_background(seq_idx=0, n_rep=20)
