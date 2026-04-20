@@ -3048,18 +3048,25 @@ class EigenMap:
             if shape_entries:
                 y0 = ylim[1] + yrange * 0.02
                 y_top = ylim[1] + yrange * 0.18
-                for entry in shape_entries:
-                    vals = np.array(entry['values'])
-                    if len(vals) == 0:
-                        continue
-                    vmin, vmax = float(vals.min()), float(vals.max())
-                    span = max(vmax - vmin, 1e-9)
-                    bar_h = (vals - vmin) / span * (y_top - y0)
-                    xs = np.arange(entry['start'], entry['start'] + len(vals))
-                    ax.bar(xs, bar_h, bottom=y0, width=0.9,
-                           color='#3949AB', alpha=0.6, edgecolor='none')
-                    ax.text(xs[0] - 1, (y0 + y_top) / 2, entry['feature'],
-                            fontsize=7, ha='right', va='center', color='#3949AB')
+                all_vals = np.concatenate([np.array(e['values'])
+                                           for e in shape_entries
+                                           if len(e['values']) > 0])
+                if len(all_vals):
+                    gmin, gmax = float(all_vals.min()), float(all_vals.max())
+                    gspan = max(gmax - gmin, 1e-9)
+                    for entry in shape_entries:
+                        vals = np.array(entry['values'])
+                        if len(vals) == 0:
+                            continue
+                        bar_h = (vals - gmin) / gspan * (y_top - y0)
+                        xs = np.arange(entry['start'],
+                                       entry['start'] + len(vals))
+                        ax.bar(xs, bar_h, bottom=y0, width=0.9,
+                               color='#3949AB', alpha=0.6, edgecolor='none')
+                    feats = sorted({e['feature'] for e in shape_entries})
+                    ax.text(-1, (y0 + y_top) / 2, '/'.join(feats),
+                            fontsize=7, ha='right', va='center',
+                            color='#3949AB')
 
             if have_motifs and self.motif_hits[ct][seq_idx]:
                 y_label = (ylim[1] + yrange * (0.25 if shape_entries else 0.05))
