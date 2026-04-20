@@ -20,6 +20,7 @@ import sys
 import itertools
 import hashlib
 import pickle
+import subprocess
 import urllib.request
 try:
     import requests
@@ -2997,25 +2998,77 @@ class EigenMap:
                 seq_idx, matches, value_key='protein',
                 unit='log2 protein', min_val=0.0, figsize=figsize)
 
-    def plot_attr_logos_with_motifs(self, seq_idx=0, figsize=(18, 4.5)):
-        """Plot attribution logos with per-cell-type motif annotations."""
+    def deep_dnashape(self, seq_idx, start, end, feature='MGW', layer=7):
+        """Run deepDNAshape on enhancer[start:end] and store values per position.
+
+        Shells out to the isolated `deepDNAshape` CLI (installed via
+        `uv tool install`), parses the per-position values, and appends
+        them to self.shape_annotations[seq_idx].
+
+        Args:
+            seq_idx: index into self.enhancers
+            start, end: enhancer positions of the window to score (end exclusive)
+            feature: MGW, ProT, HelT, Roll, ... (append '-FL' for fluctuation)
+            layer: flanking context depth (0-7)
+
+        Returns:
+            list[float] of length (end - start)
+        """
+        seq = self.enhancers[seq_idx][start:end]
+        r = subprocess.run(
+            ['deepDNAshape', '--seq', seq, '--feature', feature, '--layer', str(layer)],
+            capture_output=True, text=True, check=True,
+        )
+        values = [float(x) for x in r.stdout.split()]
+        if not hasattr(self, 'shape_annotations'):
+            self.shape_annotations = {}
+        self.shape_annotations.setdefault(seq_idx, []).append({
+            'start': start, 'end': end, 'feature': feature,
+            'layer': layer, 'values': values,
+        })
+        return values
+
+    def plot_attr_logos_with_motifs(self, seq_idx=0, figsize=(18, 4.5),
+                                    motif_annotations=True,
+                                    shape_annotations=False):
+        """Plot attribution logos with optional motif and/or shape annotations."""
         fig, axes = self.plot_attr_logos(seq_idx=seq_idx, figsize=figsize)
-        if not hasattr(self, 'motif_hits'):
-            return fig, axes
+
+        shape_entries = (getattr(self, 'shape_annotations', {}).get(seq_idx)
+                         if shape_annotations else None)
+        have_motifs = motif_annotations and hasattr(self, 'motif_hits')
+
+        headroom = 0.4 if (shape_entries and have_motifs) else 0.3
         for ci, ct in enumerate(self.cell_types):
             ax = axes[ci]
-            hits = self.motif_hits[ct][seq_idx]
-            if not hits:
-                continue
             ylim = ax.get_ylim()
             yrange = ylim[1] - ylim[0]
-            ax.set_ylim(ylim[0], ylim[1] + yrange * 0.3)
-            for h in hits:
-                mid = (h['start'] + h['end']) / 2
-                ax.annotate(h['tf'], xy=(mid, ylim[1] + yrange * 0.05),
-                            fontsize=7, ha='center', va='bottom',
-                            rotation=45, color='#333', fontweight='bold')
-                ax.axvspan(h['start'], h['end'], alpha=0.08, color='#FF9800')
+            ax.set_ylim(ylim[0], ylim[1] + yrange * headroom)
+
+            if shape_entries:
+                y0 = ylim[1] + yrange * 0.02
+                y_top = ylim[1] + yrange * 0.18
+                for entry in shape_entries:
+                    vals = np.array(entry['values'])
+                    if len(vals) == 0:
+                        continue
+                    vmin, vmax = float(vals.min()), float(vals.max())
+                    span = max(vmax - vmin, 1e-9)
+                    bar_h = (vals - vmin) / span * (y_top - y0)
+                    xs = np.arange(entry['start'], entry['start'] + len(vals))
+                    ax.bar(xs, bar_h, bottom=y0, width=0.9,
+                           color='#3949AB', alpha=0.6, edgecolor='none')
+                    ax.text(xs[0] - 1, (y0 + y_top) / 2, entry['feature'],
+                            fontsize=7, ha='right', va='center', color='#3949AB')
+
+            if have_motifs and self.motif_hits[ct][seq_idx]:
+                y_label = (ylim[1] + yrange * (0.25 if shape_entries else 0.05))
+                for h in self.motif_hits[ct][seq_idx]:
+                    mid = (h['start'] + h['end']) / 2
+                    ax.annotate(h['tf'], xy=(mid, y_label),
+                                fontsize=7, ha='center', va='bottom',
+                                rotation=45, color='#333', fontweight='bold')
+                    ax.axvspan(h['start'], h['end'], alpha=0.08, color='#FF9800')
         plt.tight_layout()
         return fig, axes
 
