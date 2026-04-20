@@ -3038,41 +3038,47 @@ class EigenMap:
                          if shape_annotations else None)
         have_motifs = motif_annotations and hasattr(self, 'motif_hits')
 
-        headroom = 0.4 if (shape_entries and have_motifs) else 0.3
+        headroom = 0.3 if (shape_entries or have_motifs) else 0.0
         for ci, ct in enumerate(self.cell_types):
             ax = axes[ci]
             ylim = ax.get_ylim()
             yrange = ylim[1] - ylim[0]
-            ax.set_ylim(ylim[0], ylim[1] + yrange * headroom)
+            if headroom:
+                ax.set_ylim(ylim[0], ylim[1] + yrange * headroom)
 
             if shape_entries:
-                y0 = ylim[1] + yrange * 0.02
-                y_top = ylim[1] + yrange * 0.18
                 all_vals = np.concatenate([np.array(e['values'])
                                            for e in shape_entries
                                            if len(e['values']) > 0])
                 if len(all_vals):
-                    gmin, gmax = float(all_vals.min()), float(all_vals.max())
-                    gspan = max(gmax - gmin, 1e-9)
+                    vmin, vmax = float(all_vals.min()), float(all_vals.max())
+                    pad = max((vmax - vmin) * 0.1, 0.05)
+                    vmin_p, vmax_p = vmin - pad, vmax + pad
+                    # Map data to top ~20% of panel: full twin span = 5× data span
+                    twin_span = (vmax_p - vmin_p) * 5
+                    ax_t = ax.twinx()
+                    ax_t.set_ylim(vmax_p - twin_span, vmax_p)
                     for entry in shape_entries:
                         vals = np.array(entry['values'])
                         if len(vals) == 0:
                             continue
-                        h = (vals - gmin) / gspan * (y_top - y0)
                         xs = np.arange(entry['start'],
                                        entry['start'] + len(vals))
-                        ax.fill_between(xs, y0, y0 + h,
-                                        color='#3949AB', alpha=0.5,
-                                        linewidth=0)
-                        ax.plot(xs, y0 + h, color='#3949AB',
-                                linewidth=0.8, alpha=0.9)
+                        ax_t.fill_between(xs, vmin_p, vals,
+                                          color='#3949AB', alpha=0.5,
+                                          linewidth=0)
+                        ax_t.plot(xs, vals, color='#3949AB',
+                                  linewidth=0.8, alpha=0.9)
                     feats = sorted({e['feature'] for e in shape_entries})
-                    ax.text(-1, (y0 + y_top) / 2, '/'.join(feats),
-                            fontsize=7, ha='right', va='center',
-                            color='#3949AB')
+                    ax_t.set_ylabel(f"{'/'.join(feats)} (Å)",
+                                    color='#3949AB', fontsize=8)
+                    ax_t.tick_params(axis='y', colors='#3949AB',
+                                     labelsize=7)
+                    ax_t.set_yticks(np.linspace(vmin, vmax, 3))
+                    ax_t.spines['top'].set_visible(False)
 
             if have_motifs and self.motif_hits[ct][seq_idx]:
-                y_label = (ylim[1] + yrange * (0.25 if shape_entries else 0.05))
+                y_label = ylim[1] + yrange * 0.05
                 for h in self.motif_hits[ct][seq_idx]:
                     mid = (h['start'] + h['end']) / 2
                     ax.annotate(h['tf'], xy=(mid, y_label),
