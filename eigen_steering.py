@@ -3058,11 +3058,14 @@ class EigenMap:
                         vals = np.array(entry['values'])
                         if len(vals) == 0:
                             continue
-                        bar_h = (vals - gmin) / gspan * (y_top - y0)
+                        h = (vals - gmin) / gspan * (y_top - y0)
                         xs = np.arange(entry['start'],
                                        entry['start'] + len(vals))
-                        ax.bar(xs, bar_h, bottom=y0, width=0.9,
-                               color='#3949AB', alpha=0.6, edgecolor='none')
+                        ax.fill_between(xs, y0, y0 + h,
+                                        color='#3949AB', alpha=0.5,
+                                        linewidth=0)
+                        ax.plot(xs, y0 + h, color='#3949AB',
+                                linewidth=0.8, alpha=0.9)
                     feats = sorted({e['feature'] for e in shape_entries})
                     ax.text(-1, (y0 + y_top) / 2, '/'.join(feats),
                             fontsize=7, ha='right', va='center',
