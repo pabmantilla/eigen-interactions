@@ -92,13 +92,24 @@ BASES = 'ACGT'
 BASE2IDX = {b: i for i, b in enumerate(BASES)}
 
 
+_BASE_LUT = np.full(128, -1, dtype=np.int8)
+for _b, _j in BASE2IDX.items():
+    _BASE_LUT[ord(_b)] = _j
+
+
 def _one_hot(seq):
-    """ACGT one-hot, (L, 4) float32. Non-ACGT bases -> all zeros at that position."""
+    """ACGT one-hot, (L, 4) float32. Non-ACGT bases -> all zeros at that position.
+    Vectorized via an ASCII lookup table.
+    """
+    idx = np.frombuffer(seq.encode('ascii'), dtype=np.uint8)
+    j = _BASE_LUT[idx]
     arr = np.zeros((len(seq), 4), dtype=np.float32)
-    for i, b in enumerate(seq):
-        j = BASE2IDX.get(b)
-        if j is not None:
-            arr[i, j] = 1.0
+    valid = j >= 0
+    if valid.all():
+        arr[np.arange(len(seq)), j] = 1.0
+    else:
+        rows = np.nonzero(valid)[0]
+        arr[rows, j[rows]] = 1.0
     return arr
 
 PROMOTER_SEQ = 'TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG'  # 36bp, constant
