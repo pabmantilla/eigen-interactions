@@ -45,18 +45,44 @@ for _p in [REPO_ROOT, _SCRIPT_DIR]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from alphagenome_pytorch import AlphaGenome
-from alphagenome_pytorch.extensions.finetuning.transfer import remove_all_heads
-from alphagenome_pytorch.extensions.finetuning.utils import sequence_to_onehot
-from fast_logo import fast_logo
-from tangermeme.deep_lift_shap import deep_lift_shap, _nonlinear
-from tangermeme.ersatz import dinucleotide_shuffle
-from tangermeme.seqlet import tfmodisco_seqlets
-from tangermeme.annotate import annotate_seqlets
-from tangermeme.io import read_meme
-from ag_deeplift_patches import patch_alphagenome, AGCustomGELU
+# Heavy deps (alphagenome / tangermeme / patches) are imported lazily by
+# `_load_heavy_deps()` so consumers of cached attributions (e.g. notebooks
+# loading from .npz) don't pay the alphagenome/shap import cost up front.
+AlphaGenome = None
+remove_all_heads = None
+fast_logo = None
+deep_lift_shap = None
+_nonlinear = None
+dinucleotide_shuffle = None
+tfmodisco_seqlets = None
+annotate_seqlets = None
+read_meme = None
+AGCustomGELU = None
+_HEAVY_LOADED = False
 
-patch_alphagenome()
+
+def _load_heavy_deps():
+    global AlphaGenome, remove_all_heads, fast_logo
+    global deep_lift_shap, _nonlinear, dinucleotide_shuffle
+    global tfmodisco_seqlets, annotate_seqlets, read_meme, AGCustomGELU
+    global _HEAVY_LOADED
+    if _HEAVY_LOADED:
+        return
+    from alphagenome_pytorch import AlphaGenome as _AG
+    from alphagenome_pytorch.extensions.finetuning.transfer import remove_all_heads as _rah
+    from fast_logo import fast_logo as _fl
+    from tangermeme.deep_lift_shap import deep_lift_shap as _dls, _nonlinear as _nl
+    from tangermeme.ersatz import dinucleotide_shuffle as _ds
+    from tangermeme.seqlet import tfmodisco_seqlets as _ts
+    from tangermeme.annotate import annotate_seqlets as _as
+    from tangermeme.io import read_meme as _rm
+    from ag_deeplift_patches import patch_alphagenome as _pa, AGCustomGELU as _agg
+    _pa()
+    AlphaGenome = _AG; remove_all_heads = _rah; fast_logo = _fl
+    deep_lift_shap = _dls; _nonlinear = _nl
+    dinucleotide_shuffle = _ds; tfmodisco_seqlets = _ts; annotate_seqlets = _as
+    read_meme = _rm; AGCustomGELU = _agg
+    _HEAVY_LOADED = True
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -64,6 +90,16 @@ patch_alphagenome()
 ENCODER_DIM = 1536
 BASES = 'ACGT'
 BASE2IDX = {b: i for i, b in enumerate(BASES)}
+
+
+def _one_hot(seq):
+    """ACGT one-hot, (L, 4) float32. Non-ACGT bases -> all zeros at that position."""
+    arr = np.zeros((len(seq), 4), dtype=np.float32)
+    for i, b in enumerate(seq):
+        j = BASE2IDX.get(b)
+        if j is not None:
+            arr[i, j] = 1.0
+    return arr
 
 PROMOTER_SEQ = 'TCCATTATATACCCTCTAGTGTCGGTTCACGCAATG'  # 36bp, constant
 RAND_BARCODE = 'AGAGACTGAGGCCAC'                       # 15bp, constant
@@ -392,7 +428,7 @@ class EigenMap:
         ohe_list = []
         for c in self.constructs:
             assert len(c) == TOTAL_LEN, f"Expected {TOTAL_LEN}bp, got {len(c)}bp"
-            ohe = sequence_to_onehot(c).astype(np.float32)
+            ohe = _one_hot(c)
             ohe_list.append(torch.from_numpy(ohe).T)
         self.X = torch.stack(ohe_list)
         print(f"Loaded {len(self.constructs)} sequences, X shape: {self.X.shape}")
@@ -410,6 +446,7 @@ class EigenMap:
 
     # ----- model loading -----
     def _load_model(self, ct, squeeze=False):
+        _load_heavy_deps()
         model_name = self.model_names[ct]
         ckpt_path = os.path.join(RESULTS_DIR, model_name, 'checkpoints', 'best_stage2.pt')
         print(f"  Loading {ct}: {ckpt_path}")
@@ -425,6 +462,7 @@ class EigenMap:
     def compute_attributions(self, method='deeplift', n_shuffles=20,
                              batch_size=20, verbose=True):
         """Compute attributions. method='deeplift' or 'ism'."""
+        _load_heavy_deps()
         assert self.X is not None, "Call load_sequences() first"
         if method == 'deeplift':
             self._compute_deeplift(n_shuffles, batch_size, verbose)
@@ -524,6 +562,7 @@ class EigenMap:
 
         Designed to be called from SLURM array jobs.
         """
+        _load_heavy_deps()
         device = torch.device(device if torch.cuda.is_available() else 'cpu')
         wp = weights_path or WEIGHTS_PATH
         rd = results_dir or RESULTS_DIR
@@ -532,7 +571,7 @@ class EigenMap:
         X_list = []
         for seq in sequences:
             construct = seq + PROMOTER_SEQ + RAND_BARCODE
-            ohe = sequence_to_onehot(construct).astype(np.float32)
+            ohe = _one_hot(construct)
             X_list.append(torch.from_numpy(ohe).T)
         X = torch.stack(X_list)
 
@@ -814,6 +853,7 @@ class EigenMap:
 
         Title shows model name, predicted value, and actual (if set via set_actual).
         """
+        _load_heavy_deps()
         n_ct = len(self.cell_types)
         all_vals = np.concatenate([
             self.attr[ct][seq_idx].ravel() for ct in self.cell_types
@@ -849,6 +889,7 @@ class EigenMap:
         Each logo is the linear combination of cell-type attributions weighted
         by the corresponding eigenvector. All logos share the same y-scale.
         """
+        _load_heavy_deps()
         r = self.eigen_results[seq_idx]
         n_ct = len(self.cell_types)
         attr_raw = {ct: self.attr[ct][seq_idx] for ct in self.cell_types}
@@ -1048,10 +1089,11 @@ class EigenMap:
 
     def predict(self, constructs, cell_type=None, batch_size=64, models=None):
         """Forward pass on construct strings. Returns {ct: array}."""
+        _load_heavy_deps()
         cts = [cell_type] if cell_type else self.cell_types
         X = []
         for c in constructs:
-            ohe = sequence_to_onehot(c).astype(np.float32)
+            ohe = _one_hot(c)
             X.append(torch.from_numpy(ohe).T)
         X = torch.stack(X)
         preds = {}
@@ -2926,6 +2968,7 @@ class EigenMap:
         with up to n_nearest candidates.
         Returns self for chaining.
         """
+        _load_heavy_deps()
         meme_file = meme_file or JASPAR_MEME
         X_tensor = self.X.float()
         motifs = read_meme(meme_file)
