@@ -742,6 +742,60 @@ class EigenMap:
               f"({'enhancer only, 230bp' if enhancer_only else 'full 281bp'})")
         return self
 
+    def cosine_similarity(self, enhancer_only=True, mode='flat'):
+        """Per-sequence cosine similarity between cell-type attribution maps.
+
+        Uses gradient-corrected attributions from `self.attr[ct]` — already
+        mean-subtracted across channels per position in `compute_attributions`
+        (Koo et al. 2021). Same sequence, different cell-type-specific models.
+
+        mode:
+          'flat'       : cosine over flattened (4*L,) attribution maps -> scalar/seq
+          'importance' : cosine over per-position importance (L,) (sum over channels)
+                         -> scalar/seq, direct analogue of `corrs` used in EI x r
+          'position'   : cosine over (4,) channel vectors at each position
+                         -> (N, L) per-position curve
+
+        For K=2 cell types: returns the cosine between the two CTs
+          - shape (N,)   for 'flat' / 'importance'
+          - shape (N, L) for 'position'
+        For K>2: returns a symmetric matrix per sequence
+          - shape (N, K, K)    for 'flat' / 'importance'
+          - shape (N, L, K, K) for 'position'
+        """
+        assert self.attr, "Call compute_attributions() first"
+        cts = list(self.cell_types)
+        K = len(cts)
+        L = ENHANCER_LEN if enhancer_only else self.X.shape[-1]
+        sl = slice(0, L)
+
+        if mode == 'flat':
+            # (N, K, 4*L)
+            V = np.stack([self.attr[ct][:, :, sl].reshape(self.X.shape[0], -1)
+                          for ct in cts], axis=1)
+            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
+            Vn = V / norms
+            M = np.einsum('nki,nji->nkj', Vn, Vn)  # (N, K, K)
+        elif mode == 'importance':
+            # (N, K, L)
+            V = np.stack([self.importance[ct][:, sl] for ct in cts], axis=1)
+            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
+            Vn = V / norms
+            M = np.einsum('nki,nji->nkj', Vn, Vn)
+        elif mode == 'position':
+            # (N, K, 4, L) -> (N, L, K, 4)
+            V = np.stack([self.attr[ct][:, :, sl] for ct in cts], axis=1)
+            V = np.transpose(V, (0, 3, 1, 2))
+            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
+            Vn = V / norms
+            M = np.einsum('nlki,nlji->nlkj', Vn, Vn)  # (N, L, K, K)
+        else:
+            raise ValueError(f"unknown mode={mode!r}; use 'flat'|'importance'|'position'")
+
+        if K == 2:
+            return M[..., 0, 1]
+        return M
+
     # ----- visualization -----
     def plot_attr_logos(self, seq_idx=0, figsize=(18, 3)):
         """Plot attribution logos for each cell type on a shared y-scale.
