@@ -742,21 +742,28 @@ class EigenMap:
               f"({'enhancer only, 230bp' if enhancer_only else 'full 281bp'})")
         return self
 
-    def cosine_similarity(self, enhancer_only=True, mode='flat'):
+    def cosine_similarity(self, enhancer_only=True, mode='flat', zscore=True):
         """Per-sequence cosine similarity between cell-type attribution maps.
 
-        Uses gradient-corrected attributions from `self.attr[ct]` — already
-        mean-subtracted across channels per position in `compute_attributions`
-        (Koo et al. 2021). Same sequence, different cell-type-specific models.
+        Pipeline (matches `eigendecompose`):
+          1. gradient-corrected attributions (already mean-subtracted across
+             channels per position in `compute_attributions`, Koo et al. 2021)
+          2. (optional, default ON) z-normalize per cell-type vector to zero
+             mean and unit variance — same preprocessing as `eigendecompose`
+             before the covariance/eigendecomp step
+          3. cosine similarity between the two CT vectors
+
+        With zscore=True, cosine == Pearson, so `mode='importance'` reproduces
+        the per-sequence `corrs` used in EI_1 var x r.
 
         mode:
           'flat'       : cosine over flattened (4*L,) attribution maps -> scalar/seq
           'importance' : cosine over per-position importance (L,) (sum over channels)
-                         -> scalar/seq, direct analogue of `corrs` used in EI x r
+                         -> scalar/seq; analogue of `corrs`
           'position'   : cosine over (4,) channel vectors at each position
                          -> (N, L) per-position curve
 
-        For K=2 cell types: returns the cosine between the two CTs
+        For K=2 cell types: returns scalar/curve cosine between the two CTs
           - shape (N,)   for 'flat' / 'importance'
           - shape (N, L) for 'position'
         For K>2: returns a symmetric matrix per sequence
@@ -769,26 +776,31 @@ class EigenMap:
         L = ENHANCER_LEN if enhancer_only else self.X.shape[-1]
         sl = slice(0, L)
 
+        def _zscore(V):
+            mu  = V.mean(axis=-1, keepdims=True)
+            std = V.std(axis=-1, keepdims=True)
+            return (V - mu) / (std + 1e-12)
+
         if mode == 'flat':
-            # (N, K, 4*L)
             V = np.stack([self.attr[ct][:, :, sl].reshape(self.X.shape[0], -1)
-                          for ct in cts], axis=1)
-            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
-            Vn = V / norms
-            M = np.einsum('nki,nji->nkj', Vn, Vn)  # (N, K, K)
+                          for ct in cts], axis=1)  # (N, K, 4*L)
+            if zscore:
+                V = _zscore(V)
+            Vn = V / (np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12)
+            M = np.einsum('nki,nji->nkj', Vn, Vn)
         elif mode == 'importance':
-            # (N, K, L)
-            V = np.stack([self.importance[ct][:, sl] for ct in cts], axis=1)
-            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
-            Vn = V / norms
+            V = np.stack([self.importance[ct][:, sl] for ct in cts], axis=1)  # (N, K, L)
+            if zscore:
+                V = _zscore(V)
+            Vn = V / (np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12)
             M = np.einsum('nki,nji->nkj', Vn, Vn)
         elif mode == 'position':
-            # (N, K, 4, L) -> (N, L, K, 4)
-            V = np.stack([self.attr[ct][:, :, sl] for ct in cts], axis=1)
-            V = np.transpose(V, (0, 3, 1, 2))
-            norms = np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12
-            Vn = V / norms
-            M = np.einsum('nlki,nlji->nlkj', Vn, Vn)  # (N, L, K, K)
+            V = np.stack([self.attr[ct][:, :, sl] for ct in cts], axis=1)  # (N, K, 4, L)
+            V = np.transpose(V, (0, 3, 1, 2))                              # (N, L, K, 4)
+            if zscore:
+                V = _zscore(V)
+            Vn = V / (np.linalg.norm(V, axis=-1, keepdims=True) + 1e-12)
+            M = np.einsum('nlki,nlji->nlkj', Vn, Vn)
         else:
             raise ValueError(f"unknown mode={mode!r}; use 'flat'|'importance'|'position'")
 
