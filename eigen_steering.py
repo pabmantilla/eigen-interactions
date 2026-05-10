@@ -554,9 +554,10 @@ class EigenMap:
                 n_shuffles=n_shuffles, batch_size=batch_size,
                 device=str(self.device),
                 additional_nonlinear_ops={AGCustomGELU: _nonlinear},
+                hypothetical=True,
                 warning_threshold=0.01, random_state=None, verbose=verbose,
-            )
-            self.attr[ct] = attr.cpu().numpy()
+            ).cpu().numpy()
+            self.attr[ct] = attr - attr.mean(axis=1, keepdims=True)
             del model
             torch.cuda.empty_cache()
 
@@ -608,12 +609,13 @@ class EigenMap:
         del pred_chunks
         torch.cuda.empty_cache()
 
-        # DeepLIFT/SHAP
+        # DeepLIFT/SHAP (hypothetical, gradient-corrected by mean-center below)
         attr = deep_lift_shap(
             model, X, target=0,
             n_shuffles=n_shuffles, batch_size=batch_size,
             device=str(device),
             additional_nonlinear_ops={AGCustomGELU: _nonlinear},
+            hypothetical=True,
             warning_threshold=0.01, random_state=None, verbose=True,
         ).cpu().numpy()
 
